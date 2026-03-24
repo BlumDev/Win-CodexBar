@@ -357,6 +357,31 @@ fn usage_display_label(display_percent: f64, show_as_used: bool) -> String {
     }
 }
 
+fn metric_severity_color(display_percent: f64) -> Color32 {
+    Theme::usage_color(display_percent.clamp(0.0, 100.0))
+}
+
+fn pace_severity_color(display_percent: f64, pace_percent: Option<f64>) -> Color32 {
+    if let Some(delta) = pace_percent {
+        let ahead = delta.max(0.0);
+        if ahead <= 2.0 {
+            Theme::GREEN
+        } else if ahead <= 8.0 {
+            Theme::YELLOW
+        } else if ahead <= 15.0 {
+            Theme::ORANGE
+        } else {
+            Theme::RED
+        }
+    } else {
+        metric_severity_color(display_percent)
+    }
+}
+
+fn tinted(color: Color32, alpha: u8) -> Color32 {
+    Color32::from_rgba_unmultiplied(color.r(), color.g(), color.b(), alpha)
+}
+
 fn load_usage_breakdown_points(
     provider_id: ProviderId,
     account_email: Option<&str>,
@@ -1768,12 +1793,15 @@ fn draw_overview_provider_row(
     let primary_percent = provider
         .session_percent
         .map(|percent| usage_display_percent(percent, show_as_used));
+    let primary_color = primary_percent
+        .map(metric_severity_color)
+        .unwrap_or(Theme::TEXT_PRIMARY);
 
     let inner = egui::Frame::none()
-        .fill(if is_selected { Theme::card_bg_hover() } else { Theme::card_bg() })
+        .fill(if is_selected { Theme::CARD_BG_HOVER } else { Theme::CARD_BG })
         .rounding(Rounding::same(Radius::SM))
         .inner_margin(egui::Margin::symmetric(12.0, 8.0))
-        .stroke(Stroke::new(if is_selected { 1.0 } else { 0.5 }, if is_selected { brand_color } else { Theme::card_border() }))
+        .stroke(Stroke::new(if is_selected { 1.0 } else { 0.5 }, if is_selected { brand_color } else { Theme::CARD_BORDER }))
         .show(ui, |ui| {
             ui.vertical(|ui| {
                 ui.horizontal(|ui| {
@@ -1789,7 +1817,7 @@ fn draw_overview_provider_row(
                     ui.label(
                         RichText::new(&provider.display_name)
                             .size(FontSize::SM)
-                            .color(Theme::text_primary())
+                            .color(Theme::TEXT_PRIMARY)
                             .strong(),
                     );
 
@@ -1798,7 +1826,7 @@ fn draw_overview_provider_row(
                         ui.label(
                             RichText::new(source.to_uppercase())
                                 .size(FontSize::XS)
-                                .color(Theme::text_muted()),
+                                .color(Theme::TEXT_MUTED),
                         );
                     }
 
@@ -1814,7 +1842,7 @@ fn draw_overview_provider_row(
                             ui.label(
                                 RichText::new(usage_display_label(percent, show_as_used))
                                     .size(FontSize::XS)
-                                    .color(Theme::text_primary())
+                                    .color(primary_color)
                                     .strong(),
                             );
                         }
@@ -1846,24 +1874,25 @@ fn draw_dashboard_stat(
     label: &str,
     value: String,
     detail: Option<&str>,
+    value_color: Color32,
 ) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{}:", label))
                 .size(FontSize::XS)
-                .color(Theme::text_secondary()),
+                .color(Theme::TEXT_SECONDARY),
         );
         ui.label(
             RichText::new(value)
                 .size(FontSize::XS)
-                .color(Theme::text_primary())
+                .color(value_color)
                 .strong(),
         );
         if let Some(detail) = detail {
             ui.label(
                 RichText::new(format!("· {}", detail))
                     .size(FontSize::XS)
-                    .color(Theme::text_secondary()),
+                    .color(Theme::TEXT_SECONDARY),
             );
         }
     });
@@ -1901,23 +1930,23 @@ fn draw_provider_dashboard_bar(
                 .rect_filled(weekly_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
 
             if let Some(session_percent) = provider.session_percent {
+                let display_percent = usage_display_percent(session_percent, show_as_used);
                 fill_bar(
                     ui,
                     session_rect,
-                    usage_display_percent(session_percent, show_as_used),
-                    brand_color,
+                    display_percent,
+                    metric_severity_color(display_percent),
                 );
             }
             if let Some(weekly_percent) = provider.weekly_percent {
+                let display_percent = usage_display_percent(weekly_percent, show_as_used);
                 fill_bar(
                     ui,
                     weekly_rect,
-                    usage_display_percent(weekly_percent, show_as_used),
-                    Color32::from_rgba_unmultiplied(
-                        brand_color.r(),
-                        brand_color.g(),
-                        brand_color.b(),
-                        165,
+                    display_percent,
+                    tinted(
+                        pace_severity_color(display_percent, provider.pace_percent),
+                        210,
                     ),
                 );
             }
@@ -1947,23 +1976,25 @@ fn draw_provider_dashboard_bar(
                 .rect_filled(api_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
 
             if let Some(auto_percent) = provider.weekly_percent {
+                let display_percent = usage_display_percent(auto_percent, show_as_used);
                 fill_bar(
                     ui,
                     auto_rect,
-                    usage_display_percent(auto_percent, show_as_used),
-                    brand_color,
+                    display_percent,
+                    metric_severity_color(display_percent),
                 );
             }
             if let Some(api_percent) = provider.model_percent {
+                let display_percent = usage_display_percent(api_percent, show_as_used);
                 fill_bar(
                     ui,
                     api_rect,
-                    usage_display_percent(api_percent, show_as_used),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                    display_percent,
+                    tinted(metric_severity_color(display_percent), 190),
                 );
             }
         }
-        "gemini" => {
+        "gemini" | "antigravity" => {
             let bar_width = ui.available_width();
             let bar_height = 4.0;
             let bar_gap = 3.0;
@@ -1995,32 +2026,30 @@ fn draw_provider_dashboard_bar(
             }
 
             if let Some(pro_percent) = provider.session_percent {
+                let display_percent = usage_display_percent(pro_percent, show_as_used);
                 fill_bar(
                     ui,
                     pro_rect,
-                    usage_display_percent(pro_percent, show_as_used),
-                    brand_color,
+                    display_percent,
+                    metric_severity_color(display_percent),
                 );
             }
             if let Some(flash_percent) = provider.weekly_percent {
+                let display_percent = usage_display_percent(flash_percent, show_as_used);
                 fill_bar(
                     ui,
                     flash_rect,
-                    usage_display_percent(flash_percent, show_as_used),
-                    Color32::from_rgba_unmultiplied(
-                        brand_color.r(),
-                        brand_color.g(),
-                        brand_color.b(),
-                        190,
-                    ),
+                    display_percent,
+                    tinted(metric_severity_color(display_percent), 210),
                 );
             }
             if let Some(other_percent) = provider.model_percent {
+                let display_percent = usage_display_percent(other_percent, show_as_used);
                 fill_bar(
                     ui,
                     other_rect,
-                    usage_display_percent(other_percent, show_as_used),
-                    Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                    display_percent,
+                    tinted(metric_severity_color(display_percent), 190),
                 );
             }
         }
@@ -2036,11 +2065,12 @@ fn draw_provider_dashboard_bar(
                 .rect_filled(bar_rect, Rounding::same(3.0), Theme::progress_track());
 
             if let Some(primary_percent) = provider.session_percent {
+                let display_percent = usage_display_percent(primary_percent, show_as_used);
                 fill_bar(
                     ui,
                     bar_rect,
-                    usage_display_percent(primary_percent, show_as_used),
-                    brand_color,
+                    display_percent,
+                    metric_severity_color(display_percent),
                 );
             }
         }
@@ -2067,6 +2097,10 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
                     .unwrap_or_else(|| "No data".to_string()),
                 provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| metric_severity_color(usage_display_percent(percent, show_as_used)))
+                    .unwrap_or(Theme::TEXT_PRIMARY),
             );
             if let Some(weekly_percent) = provider.weekly_percent {
                 draw_dashboard_stat(
@@ -2074,6 +2108,10 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Week",
                     usage_display_label(usage_display_percent(weekly_percent, show_as_used), show_as_used),
                     provider.weekly_reset.as_deref(),
+                    pace_severity_color(
+                        usage_display_percent(weekly_percent, show_as_used),
+                        provider.pace_percent,
+                    ),
                 );
             }
         }
@@ -2084,6 +2122,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Auto+Composer",
                     usage_display_label(usage_display_percent(auto_percent, show_as_used), show_as_used),
                     None,
+                    metric_severity_color(usage_display_percent(auto_percent, show_as_used)),
                 );
             }
             if let Some(api_percent) = provider.model_percent {
@@ -2092,6 +2131,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "API",
                     usage_display_label(usage_display_percent(api_percent, show_as_used), show_as_used),
                     None,
+                    metric_severity_color(usage_display_percent(api_percent, show_as_used)),
                 );
             }
             draw_dashboard_stat(
@@ -2102,6 +2142,10 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
                     .unwrap_or_else(|| "No data".to_string()),
                 provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| metric_severity_color(usage_display_percent(percent, show_as_used)))
+                    .unwrap_or(Theme::TEXT_PRIMARY),
             );
         }
         "gemini" => {
@@ -2115,6 +2159,10 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     })
                     .unwrap_or_else(|| "No data".to_string()),
                 provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| metric_severity_color(usage_display_percent(percent, show_as_used)))
+                    .unwrap_or(Theme::TEXT_PRIMARY),
             );
             if let Some(flash_percent) = provider.weekly_percent {
                 draw_dashboard_stat(
@@ -2122,6 +2170,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Flash",
                     usage_display_label(usage_display_percent(flash_percent, show_as_used), show_as_used),
                     provider.weekly_reset.as_deref(),
+                    metric_severity_color(usage_display_percent(flash_percent, show_as_used)),
                 );
             }
             if let Some(other_percent) = provider.model_percent {
@@ -2130,6 +2179,40 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Other",
                     usage_display_label(usage_display_percent(other_percent, show_as_used), show_as_used),
                     provider.model_name.as_deref(),
+                    metric_severity_color(usage_display_percent(other_percent, show_as_used)),
+                );
+            }
+        }
+        "antigravity" => {
+            draw_dashboard_stat(
+                ui,
+                "Claude",
+                provider
+                    .session_percent
+                    .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| metric_severity_color(usage_display_percent(percent, show_as_used)))
+                    .unwrap_or(Theme::TEXT_PRIMARY),
+            );
+            if let Some(pro_percent) = provider.weekly_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Gemini Pro",
+                    usage_display_label(usage_display_percent(pro_percent, show_as_used), show_as_used),
+                    provider.weekly_reset.as_deref(),
+                    metric_severity_color(usage_display_percent(pro_percent, show_as_used)),
+                );
+            }
+            if let Some(flash_percent) = provider.model_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Gemini Flash",
+                    usage_display_label(usage_display_percent(flash_percent, show_as_used), show_as_used),
+                    None,
+                    metric_severity_color(usage_display_percent(flash_percent, show_as_used)),
                 );
             }
         }
@@ -2142,6 +2225,10 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
                     .unwrap_or_else(|| "No data".to_string()),
                 provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| metric_severity_color(usage_display_percent(percent, show_as_used)))
+                    .unwrap_or(Theme::TEXT_PRIMARY),
             );
             if let Some(secondary_percent) = provider.weekly_percent {
                 draw_dashboard_stat(
@@ -2149,6 +2236,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Secondary",
                     usage_display_label(usage_display_percent(secondary_percent, show_as_used), show_as_used),
                     provider.weekly_reset.as_deref(),
+                    metric_severity_color(usage_display_percent(secondary_percent, show_as_used)),
                 );
             }
             if let Some(model_percent) = provider.model_percent {
@@ -2157,17 +2245,18 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     "Model",
                     usage_display_label(usage_display_percent(model_percent, show_as_used), show_as_used),
                     provider.model_name.as_deref(),
+                    metric_severity_color(usage_display_percent(model_percent, show_as_used)),
                 );
             }
         }
     }
 
     if let Some(cost) = provider.cost_used.as_ref() {
-        draw_dashboard_stat(ui, "Spend", cost.clone(), None);
+        draw_dashboard_stat(ui, "Spend", cost.clone(), None, Theme::TEXT_PRIMARY);
     }
 
     if let Some(plan) = provider.plan.as_ref() {
-        draw_dashboard_stat(ui, "Plan", plan.clone(), None);
+        draw_dashboard_stat(ui, "Plan", plan.clone(), None, Theme::TEXT_PRIMARY);
     }
 }
 
@@ -2301,13 +2390,14 @@ fn draw_provider_detail_card(
             match provider.name.as_str() {
                 "codex" => {
                     if let Some(session_pct) = provider.session_percent {
+                        let display_percent = usage_display_percent(session_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "5h Window",
                             session_pct,
                             show_as_used,
                             provider.session_reset.as_deref(),
-                            brand_color,
+                            metric_severity_color(display_percent),
                             content_width,
                             None,
                             false,
@@ -2316,13 +2406,14 @@ fn draw_provider_detail_card(
 
                     if let Some(weekly_pct) = provider.weekly_percent {
                         ui.add_space(12.0);
+                        let display_percent = usage_display_percent(weekly_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "Weekly",
                             weekly_pct,
                             show_as_used,
                             provider.weekly_reset.as_deref(),
-                            brand_color,
+                            pace_severity_color(display_percent, provider.pace_percent),
                             content_width,
                             provider.pace_percent,
                             provider.pace_lasts_to_reset,
@@ -2331,13 +2422,14 @@ fn draw_provider_detail_card(
                 }
                 "cursor" => {
                     if let Some(auto_pct) = provider.weekly_percent {
+                        let display_percent = usage_display_percent(auto_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "Auto + Composer",
                             auto_pct,
                             show_as_used,
                             provider.weekly_reset.as_deref(),
-                            brand_color,
+                            metric_severity_color(display_percent),
                             content_width,
                             None,
                             false,
@@ -2346,13 +2438,14 @@ fn draw_provider_detail_card(
 
                     if let Some(api_pct) = provider.model_percent {
                         ui.add_space(12.0);
+                        let display_percent = usage_display_percent(api_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "API",
                             api_pct,
                             show_as_used,
                             provider.session_reset.as_deref(),
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                            tinted(metric_severity_color(display_percent), 210),
                             content_width,
                             None,
                             false,
@@ -2367,18 +2460,25 @@ fn draw_provider_detail_card(
                             total_pct,
                             show_as_used,
                             provider.session_reset.as_deref(),
+                            provider
+                                .session_percent
+                                .map(|percent| {
+                                    metric_severity_color(usage_display_percent(percent, show_as_used))
+                                })
+                                .unwrap_or(Theme::TEXT_PRIMARY),
                         );
                     }
                 }
                 "gemini" => {
                     if let Some(pro_pct) = provider.session_percent {
+                        let display_percent = usage_display_percent(pro_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "Gemini Pro",
                             pro_pct,
                             show_as_used,
                             provider.session_reset.as_deref(),
-                            brand_color,
+                            metric_severity_color(display_percent),
                             content_width,
                             None,
                             false,
@@ -2387,18 +2487,14 @@ fn draw_provider_detail_card(
 
                     if let Some(flash_pct) = provider.weekly_percent {
                         ui.add_space(12.0);
+                        let display_percent = usage_display_percent(flash_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "Gemini Flash",
                             flash_pct,
                             show_as_used,
                             provider.weekly_reset.as_deref(),
-                            Color32::from_rgba_unmultiplied(
-                                brand_color.r(),
-                                brand_color.g(),
-                                brand_color.b(),
-                                190,
-                            ),
+                            tinted(metric_severity_color(display_percent), 210),
                             content_width,
                             None,
                             false,
@@ -2407,13 +2503,63 @@ fn draw_provider_detail_card(
 
                     if let Some(other_pct) = provider.model_percent {
                         ui.add_space(12.0);
+                        let display_percent = usage_display_percent(other_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             provider.model_name.as_deref().unwrap_or("Other Models"),
                             other_pct,
                             show_as_used,
                             None,
-                            Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                            tinted(metric_severity_color(display_percent), 190),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+                }
+                "antigravity" => {
+                    if let Some(claude_pct) = provider.session_percent {
+                        let display_percent = usage_display_percent(claude_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            "Claude",
+                            claude_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            metric_severity_color(display_percent),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+
+                    if let Some(gemini_pro_pct) = provider.weekly_percent {
+                        ui.add_space(12.0);
+                        let display_percent = usage_display_percent(gemini_pro_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            "Gemini Pro",
+                            gemini_pro_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            tinted(metric_severity_color(display_percent), 210),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+
+                    if let Some(gemini_flash_pct) = provider.model_percent {
+                        ui.add_space(12.0);
+                        let display_percent =
+                            usage_display_percent(gemini_flash_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            "Gemini Flash",
+                            gemini_flash_pct,
+                            show_as_used,
+                            None,
+                            tinted(metric_severity_color(display_percent), 190),
                             content_width,
                             None,
                             false,
@@ -2422,13 +2568,14 @@ fn draw_provider_detail_card(
                 }
                 _ => {
                     if let Some(session_pct) = provider.session_percent {
+                        let display_percent = usage_display_percent(session_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             "Session",
                             session_pct,
                             show_as_used,
                             provider.session_reset.as_deref(),
-                            brand_color,
+                            metric_severity_color(display_percent),
                             content_width,
                             None,
                             false,
@@ -2437,6 +2584,7 @@ fn draw_provider_detail_card(
 
                     if let Some(weekly_pct) = provider.weekly_percent {
                         ui.add_space(12.0);
+                        let display_percent = usage_display_percent(weekly_pct, show_as_used);
 
                         draw_metric_row(
                             ui,
@@ -2444,7 +2592,7 @@ fn draw_provider_detail_card(
                             weekly_pct,
                             show_as_used,
                             provider.weekly_reset.as_deref(),
-                            brand_color,
+                            pace_severity_color(display_percent, provider.pace_percent),
                             content_width,
                             provider.pace_percent,
                             provider.pace_lasts_to_reset,
@@ -2455,13 +2603,14 @@ fn draw_provider_detail_card(
                         ui.add_space(12.0);
 
                         let model_label = provider.model_name.as_deref().unwrap_or("Model");
+                        let display_percent = usage_display_percent(model_pct, show_as_used);
                         draw_metric_row(
                             ui,
                             model_label,
                             model_pct,
                             show_as_used,
                             None,
-                            brand_color,
+                            metric_severity_color(display_percent),
                             content_width,
                             None,
                             false,
@@ -2722,12 +2871,13 @@ fn draw_metric_summary_row(
     percent: f64,
     show_as_used: bool,
     reset_text: Option<&str>,
+    value_color: Color32,
 ) {
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(title)
                 .size(FontSize::BASE)
-                .color(Theme::text_primary())
+                .color(Theme::TEXT_PRIMARY)
                 .strong(),
         );
         ui.add_space(8.0);
@@ -2737,7 +2887,7 @@ fn draw_metric_summary_row(
                 show_as_used,
             ))
             .size(FontSize::SM)
-            .color(Theme::text_primary()),
+            .color(value_color),
         );
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
@@ -2745,7 +2895,7 @@ fn draw_metric_summary_row(
                 ui.label(
                     RichText::new(format!("Resets in {}", reset))
                         .size(FontSize::XS)
-                        .color(Theme::text_secondary()),
+                        .color(Theme::TEXT_SECONDARY),
                 );
             }
         });
@@ -2756,7 +2906,7 @@ fn section_header_inline(ui: &mut egui::Ui, title: &str) {
     ui.label(
         RichText::new(title)
             .size(FontSize::XS)
-            .color(Theme::text_muted())
+            .color(Theme::TEXT_MUTED)
             .strong(),
     );
 }
@@ -2862,10 +3012,11 @@ fn draw_metric_row(
 
     // Info row: X% used (left) | Pace status | Resets in Xh (right) - .font(.footnote)
     ui.horizontal(|ui| {
+        let usage_text_color = pace_severity_color(display_percent, pace_percent);
         ui.label(
             RichText::new(usage_display_label(display_percent, show_as_used))
                 .size(FontSize::XS)
-                .color(Theme::TEXT_PRIMARY),
+                .color(usage_text_color),
         );
 
         // Pace status indicator
@@ -2874,7 +3025,7 @@ fn draw_metric_row(
             let (pace_text, pace_color) = if pace_lasts_to_reset {
                 ("On track", Theme::GREEN)
             } else {
-                ("Behind", Theme::YELLOW)
+                ("Ahead", usage_text_color)
             };
             ui.label(
                 RichText::new(pace_text)

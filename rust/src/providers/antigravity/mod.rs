@@ -4,6 +4,7 @@
 //! Uses Windows process detection to find CSRF token
 
 use async_trait::async_trait;
+use chrono::{DateTime, Utc};
 use regex_lite::Regex;
 use serde::Deserialize;
 #[cfg(windows)]
@@ -444,10 +445,20 @@ fn classify_model(label: &str) -> ModelFamily {
     }
 }
 
+fn parse_reset_time(value: &str) -> Option<DateTime<Utc>> {
+    DateTime::parse_from_rfc3339(value)
+        .ok()
+        .map(|dt| dt.with_timezone(&Utc))
+}
+
 fn rate_window_from_quota(quota: &QuotaInfo) -> RateWindow {
     let remaining = quota.remaining_fraction.unwrap_or(1.0);
     let used_percent = (1.0 - remaining) * 100.0;
-    RateWindow::with_details(used_percent, None, None, quota.reset_time.clone())
+    let resets_at = quota
+        .reset_time
+        .as_deref()
+        .and_then(parse_reset_time);
+    RateWindow::with_details(used_percent, None, resets_at, quota.reset_time.clone())
 }
 
 #[cfg(test)]
