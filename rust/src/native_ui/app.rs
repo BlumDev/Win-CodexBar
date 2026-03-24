@@ -14,7 +14,7 @@ use super::charts::{
 };
 use super::preferences::PreferencesWindow;
 use super::provider_icons::ProviderIconCache;
-use super::theme::{provider_color, status_color, FontSize, Radius, Spacing, Theme};
+use super::theme::{provider_color, provider_icon, status_color, FontSize, Radius, Spacing, Theme};
 use crate::browser::cookies::get_cookie_header;
 use crate::core::{
     FetchContext, OpenAIDashboardCacheStore, PersonalInfoRedactor, Provider, ProviderFetchResult,
@@ -78,6 +78,7 @@ pub struct ProviderData {
     pub name: String,
     pub display_name: String,
     pub account: Option<String>, // Account email for display
+    pub source_label: Option<String>,
     pub session_percent: Option<f64>,
     pub session_reset: Option<String>,
     pub weekly_percent: Option<f64>,
@@ -105,6 +106,7 @@ impl ProviderData {
             name: id.cli_name().to_string(),
             display_name: id.display_name().to_string(),
             account: None,
+            source_label: None,
             session_percent: None,
             session_reset: None,
             weekly_percent: None,
@@ -158,6 +160,7 @@ impl ProviderData {
             name: id.cli_name().to_string(),
             display_name: id.display_name().to_string(),
             account: snapshot.account_email.clone(), // Account email if available
+            source_label: Some(result.source_label.clone()),
             session_percent: Some(snapshot.primary.used_percent),
             session_reset: snapshot
                 .primary
@@ -169,10 +172,14 @@ impl ProviderData {
                     .map(|t| format_reset_time(t, reset_time_relative))
             }),
             model_percent: snapshot.model_specific.as_ref().map(|m| m.used_percent),
-            model_name: snapshot
-                .model_specific
-                .as_ref()
-                .and_then(|m| m.reset_description.clone()),
+            model_name: if id == ProviderId::Gemini && snapshot.model_specific.is_some() {
+                Some("Other Models".to_string())
+            } else {
+                snapshot
+                    .model_specific
+                    .as_ref()
+                    .and_then(|m| m.reset_description.clone())
+            },
             plan: snapshot.login_method.clone(),
             error: None,
             dashboard_url: metadata.dashboard_url.map(|s| s.to_string()),
@@ -194,6 +201,7 @@ impl ProviderData {
             name: id.cli_name().to_string(),
             display_name: id.display_name().to_string(),
             account: None,
+            source_label: None,
             session_percent: None,
             session_reset: None,
             weekly_percent: None,
@@ -683,10 +691,10 @@ impl CodexBarApp {
 
         let margin = 12.0;
         let gap = 10.0;
-        let min_size = egui::vec2(320.0, 320.0);
+        let min_size = egui::vec2(460.0, 540.0);
         let max_w = (work_area.width() - margin * 2.0).max(min_size.x);
         let max_h = (work_area.height() - margin * 2.0).max(min_size.y);
-        let target_size = egui::vec2(360.0_f32.min(max_w), 500.0_f32.min(max_h));
+        let target_size = egui::vec2(560.0_f32.min(max_w), 720.0_f32.min(max_h));
         ctx.send_viewport_cmd(egui::ViewportCommand::InnerSize(target_size));
 
         let anchor = if anchor_to_pointer {
@@ -1553,9 +1561,6 @@ impl eframe::App for CodexBarApp {
                         ui.add_space(Spacing::MD);
                     }
 
-                    // ════════════════════════════════════════════════════════════
-                    // PROVIDER ICON GRID - macOS style with icons + names
-                    // ════════════════════════════════════════════════════════════
                     if !providers.is_empty() {
                         let visible_providers: Vec<(usize, &ProviderData)> = providers.iter()
                             .enumerate()
@@ -1563,127 +1568,34 @@ impl eframe::App for CodexBarApp {
                             .collect();
 
                         if !visible_providers.is_empty() {
-                            // Provider grid - 4 columns with icons and names (compact)
-                            let columns = 4;
-                            let available_width = ui.available_width();
-                            let cell_width = available_width / columns as f32;
-                            let cell_height = 44.0; // Compact: icon + small name
-
-                            egui::Grid::new("provider_grid")
-                                .num_columns(columns)
-                                .spacing([0.0, 2.0])
-                                .show(ui, |ui| {
-                                    for (i, (original_idx, provider)) in visible_providers.iter().enumerate() {
-                                        let is_selected = *original_idx == selected_idx;
-                                        let brand_color = provider_color(&provider.name);
-
-                                        let (rect, response) = ui.allocate_exact_size(
-                                            Vec2::new(cell_width, cell_height),
-                                            egui::Sense::click()
-                                        );
-
-                                        // Selection/hover background
-                                        if is_selected {
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                Rounding::same(Radius::SM),
-                                                brand_color,
-                                            );
-                                        } else if response.hovered() {
-                                            ui.painter().rect_filled(
-                                                rect,
-                                                Rounding::same(Radius::SM),
-                                                Theme::CARD_BG_HOVER,
-                                            );
-                                        }
-
-                                        // Icon (centered horizontally, near top)
-                                        let icon_color = if is_selected { Color32::WHITE } else { brand_color };
-                                        let icon_size = 18.0;
-                                        let icon_center_y = rect.min.y + 14.0;
-                                        let icon_min = egui::pos2(
-                                            rect.center().x - icon_size / 2.0,
-                                            icon_center_y - icon_size / 2.0
-                                        );
-
-                                        if let Some(texture) = self.icon_cache.get_icon(ui.ctx(), &provider.name, icon_size as u32) {
-                                            let img_rect = Rect::from_min_size(icon_min, Vec2::splat(icon_size));
-                                            ui.painter().image(
-                                                texture.id(),
-                                                img_rect,
-                                                Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
-                                                icon_color,
-                                            );
-                                        } else {
-                                            let letter = provider.display_name.chars().next().unwrap_or('?').to_string();
-                                            ui.painter().text(
-                                                egui::pos2(rect.center().x, icon_center_y),
-                                                egui::Align2::CENTER_CENTER,
-                                                letter,
-                                                egui::FontId::proportional(14.0),
-                                                icon_color,
-                                            );
-                                        }
-
-                                        // Provider name below icon
-                                        let text_color = if is_selected { Color32::WHITE } else { Theme::TEXT_SECONDARY };
-                                        let name_y = rect.min.y + 32.0;
-                                        // Truncate long names
-                                        let display_name = if provider.display_name.len() > 7 {
-                                            format!("{}…", &provider.display_name[..6])
-                                        } else {
-                                            provider.display_name.clone()
-                                        };
-                                        ui.painter().text(
-                                            egui::pos2(rect.center().x, name_y),
-                                            egui::Align2::CENTER_CENTER,
-                                            display_name,
-                                            egui::FontId::proportional(9.0),
-                                            text_color,
-                                        );
-
-                                        // Status dot overlay for non-Operational statuses
-                                        if provider.status_level != StatusLevel::Operational && provider.status_level != StatusLevel::Unknown {
-                                            let dot_radius = 4.0;
-                                            let dot_center = egui::pos2(
-                                                rect.max.x - dot_radius - 4.0,
-                                                rect.min.y + dot_radius + 4.0,
-                                            );
-                                            let dot_color = status_color(provider.status_level);
-                                            ui.painter().circle_filled(dot_center, dot_radius, dot_color);
-                                        }
-
-                                        if response.clicked() {
-                                            if let Ok(mut state) = self.state.lock() {
-                                                state.selected_provider_idx = *original_idx;
-                                            }
-                                        }
-
-                                        // End row after 4 columns
-                                        if (i + 1) % columns == 0 {
-                                            ui.end_row();
-                                        }
-                                    }
-                                });
-
-                            // Divider between grid and detail card
-                            ui.add_space(2.0);
-                            let sep_rect = ui.available_rect_before_wrap();
-                            ui.painter().hline(
-                                sep_rect.x_range(),
-                                sep_rect.top(),
-                                Stroke::new(1.0, Theme::SEPARATOR),
-                            );
-                            ui.add_space(2.0);
-
-                            // ════════════════════════════════════════════════════════════
-                            // SELECTED PROVIDER DETAIL CARD
-                            // ════════════════════════════════════════════════════════════
                             let mut manual_refresh_requested = false;
                             let mut account_switch_provider: Option<String> = None;
                             let show_credits = self.settings.show_credits_extra_usage;
                             let show_as_used = self.settings.show_as_used;
                             let hide_personal_info = self.settings.hide_personal_info;
+
+                            section_header_inline(ui, "Dashboard");
+                            ui.add_space(4.0);
+                            for (original_idx, provider) in &visible_providers {
+                                let is_selected = *original_idx == selected_idx;
+                                let clicked = draw_overview_provider_row(
+                                    ui,
+                                    provider,
+                                    &mut self.icon_cache,
+                                    show_as_used,
+                                    is_selected,
+                                );
+                                if clicked {
+                                    if let Ok(mut state) = self.state.lock() {
+                                        state.selected_provider_idx = *original_idx;
+                                    }
+                                }
+                                ui.add_space(4.0);
+                            }
+
+                            ui.add_space(4.0);
+                            draw_horizontal_separator(ui, 0.0);
+                            ui.add_space(4.0);
                             if let Some((_, selected_provider)) = visible_providers.iter().find(|(idx, _)| *idx == selected_idx) {
                                 let (refresh, switch) = draw_provider_detail_card(
                                     ui,
@@ -1844,6 +1756,421 @@ impl eframe::App for CodexBarApp {
     }
 }
 
+/// Compact row for the Overview tab: icon, name, and usage bar
+fn draw_overview_provider_row(
+    ui: &mut egui::Ui,
+    provider: &ProviderData,
+    _icon_cache: &mut ProviderIconCache,
+    show_as_used: bool,
+    is_selected: bool,
+) -> bool {
+    let brand_color = provider_color(&provider.name);
+    let primary_percent = provider
+        .session_percent
+        .map(|percent| usage_display_percent(percent, show_as_used));
+
+    let inner = egui::Frame::none()
+        .fill(if is_selected { Theme::card_bg_hover() } else { Theme::card_bg() })
+        .rounding(Rounding::same(Radius::SM))
+        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .stroke(Stroke::new(if is_selected { 1.0 } else { 0.5 }, if is_selected { brand_color } else { Theme::card_border() }))
+        .show(ui, |ui| {
+            ui.vertical(|ui| {
+                ui.horizontal(|ui| {
+                    let icon_char = provider_icon(&provider.name);
+                    ui.label(
+                        RichText::new(icon_char)
+                            .size(FontSize::BASE)
+                            .color(brand_color),
+                    );
+
+                    ui.add_space(4.0);
+
+                    ui.label(
+                        RichText::new(&provider.display_name)
+                            .size(FontSize::SM)
+                            .color(Theme::text_primary())
+                            .strong(),
+                    );
+
+                    if let Some(source) = provider.source_label.as_ref() {
+                        ui.add_space(6.0);
+                        ui.label(
+                            RichText::new(source.to_uppercase())
+                                .size(FontSize::XS)
+                                .color(Theme::text_muted()),
+                        );
+                    }
+
+                    ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                        if let Some(error) = &provider.error {
+                            let short = if error.len() > 30 {
+                                format!("{}…", &error[..29])
+                            } else {
+                                error.clone()
+                            };
+                            ui.label(RichText::new(short).size(FontSize::XS).color(Theme::RED));
+                        } else if let Some(percent) = primary_percent {
+                            ui.label(
+                                RichText::new(usage_display_label(percent, show_as_used))
+                                    .size(FontSize::XS)
+                                    .color(Theme::text_primary())
+                                    .strong(),
+                            );
+                        }
+                    });
+                });
+
+                ui.add_space(6.0);
+
+                draw_provider_dashboard_bar(ui, provider, show_as_used, brand_color);
+
+                ui.add_space(5.0);
+
+                ui.horizontal_wrapped(|ui| {
+                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                    draw_provider_dashboard_stats(ui, provider, show_as_used);
+                });
+            });
+        });
+    let response = ui.interact(
+        inner.response.rect,
+        ui.id().with(("provider_row", provider.name.as_str())),
+        egui::Sense::click(),
+    );
+    response.clicked()
+}
+
+fn draw_dashboard_stat(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: String,
+    detail: Option<&str>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(format!("{}:", label))
+                .size(FontSize::XS)
+                .color(Theme::text_secondary()),
+        );
+        ui.label(
+            RichText::new(value)
+                .size(FontSize::XS)
+                .color(Theme::text_primary())
+                .strong(),
+        );
+        if let Some(detail) = detail {
+            ui.label(
+                RichText::new(format!("· {}", detail))
+                    .size(FontSize::XS)
+                    .color(Theme::text_secondary()),
+            );
+        }
+    });
+}
+
+fn draw_provider_dashboard_bar(
+    ui: &mut egui::Ui,
+    provider: &ProviderData,
+    show_as_used: bool,
+    brand_color: Color32,
+) {
+    match provider.name.as_str() {
+        "codex" => {
+            let bar_width = ui.available_width();
+            let bar_height = 5.0;
+            let bar_gap = 3.0;
+            let total_height = (bar_height * 2.0) + bar_gap;
+            let (stack_rect, _) = ui.allocate_exact_size(
+                Vec2::new(bar_width, total_height),
+                egui::Sense::hover(),
+            );
+
+            let session_rect = Rect::from_min_size(
+                stack_rect.min,
+                Vec2::new(bar_width, bar_height),
+            );
+            let weekly_rect = Rect::from_min_size(
+                egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
+                Vec2::new(bar_width, bar_height),
+            );
+
+            ui.painter()
+                .rect_filled(session_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
+            ui.painter()
+                .rect_filled(weekly_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
+
+            if let Some(session_percent) = provider.session_percent {
+                fill_bar(
+                    ui,
+                    session_rect,
+                    usage_display_percent(session_percent, show_as_used),
+                    brand_color,
+                );
+            }
+            if let Some(weekly_percent) = provider.weekly_percent {
+                fill_bar(
+                    ui,
+                    weekly_rect,
+                    usage_display_percent(weekly_percent, show_as_used),
+                    Color32::from_rgba_unmultiplied(
+                        brand_color.r(),
+                        brand_color.g(),
+                        brand_color.b(),
+                        165,
+                    ),
+                );
+            }
+        }
+        "cursor" => {
+            let bar_width = ui.available_width();
+            let bar_height = 5.0;
+            let bar_gap = 3.0;
+            let total_height = (bar_height * 2.0) + bar_gap;
+            let (stack_rect, _) = ui.allocate_exact_size(
+                Vec2::new(bar_width, total_height),
+                egui::Sense::hover(),
+            );
+
+            let auto_rect = Rect::from_min_size(
+                stack_rect.min,
+                Vec2::new(bar_width, bar_height),
+            );
+            let api_rect = Rect::from_min_size(
+                egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
+                Vec2::new(bar_width, bar_height),
+            );
+
+            ui.painter()
+                .rect_filled(auto_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
+            ui.painter()
+                .rect_filled(api_rect, Rounding::same(bar_height / 2.0), Theme::progress_track());
+
+            if let Some(auto_percent) = provider.weekly_percent {
+                fill_bar(
+                    ui,
+                    auto_rect,
+                    usage_display_percent(auto_percent, show_as_used),
+                    brand_color,
+                );
+            }
+            if let Some(api_percent) = provider.model_percent {
+                fill_bar(
+                    ui,
+                    api_rect,
+                    usage_display_percent(api_percent, show_as_used),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                );
+            }
+        }
+        "gemini" => {
+            let bar_width = ui.available_width();
+            let bar_height = 4.0;
+            let bar_gap = 3.0;
+            let total_height = (bar_height * 3.0) + (bar_gap * 2.0);
+            let (stack_rect, _) = ui.allocate_exact_size(
+                Vec2::new(bar_width, total_height),
+                egui::Sense::hover(),
+            );
+
+            let pro_rect = Rect::from_min_size(stack_rect.min, Vec2::new(bar_width, bar_height));
+            let flash_rect = Rect::from_min_size(
+                egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
+                Vec2::new(bar_width, bar_height),
+            );
+            let other_rect = Rect::from_min_size(
+                egui::pos2(
+                    stack_rect.min.x,
+                    stack_rect.min.y + (bar_height + bar_gap) * 2.0,
+                ),
+                Vec2::new(bar_width, bar_height),
+            );
+
+            for rect in [pro_rect, flash_rect, other_rect] {
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::same(bar_height / 2.0),
+                    Theme::progress_track(),
+                );
+            }
+
+            if let Some(pro_percent) = provider.session_percent {
+                fill_bar(
+                    ui,
+                    pro_rect,
+                    usage_display_percent(pro_percent, show_as_used),
+                    brand_color,
+                );
+            }
+            if let Some(flash_percent) = provider.weekly_percent {
+                fill_bar(
+                    ui,
+                    flash_rect,
+                    usage_display_percent(flash_percent, show_as_used),
+                    Color32::from_rgba_unmultiplied(
+                        brand_color.r(),
+                        brand_color.g(),
+                        brand_color.b(),
+                        190,
+                    ),
+                );
+            }
+            if let Some(other_percent) = provider.model_percent {
+                fill_bar(
+                    ui,
+                    other_rect,
+                    usage_display_percent(other_percent, show_as_used),
+                    Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                );
+            }
+        }
+        _ => {
+            let bar_width = ui.available_width();
+            let bar_height = 6.0;
+            let (bar_rect, _) = ui.allocate_exact_size(
+                Vec2::new(bar_width, bar_height),
+                egui::Sense::hover(),
+            );
+
+            ui.painter()
+                .rect_filled(bar_rect, Rounding::same(3.0), Theme::progress_track());
+
+            if let Some(primary_percent) = provider.session_percent {
+                fill_bar(
+                    ui,
+                    bar_rect,
+                    usage_display_percent(primary_percent, show_as_used),
+                    brand_color,
+                );
+            }
+        }
+    }
+}
+
+fn fill_bar(ui: &egui::Ui, rect: Rect, percent: f64, color: Color32) {
+    let fill_width = rect.width() * (percent as f32 / 100.0).clamp(0.0, 1.0);
+    if fill_width > 0.0 {
+        let fill_rect = Rect::from_min_size(rect.min, Vec2::new(fill_width, rect.height()));
+        ui.painter()
+            .rect_filled(fill_rect, Rounding::same(rect.height() / 2.0), color);
+    }
+}
+
+fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, show_as_used: bool) {
+    match provider.name.as_str() {
+        "codex" => {
+            draw_dashboard_stat(
+                ui,
+                "5h",
+                provider
+                    .session_percent
+                    .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+            );
+            if let Some(weekly_percent) = provider.weekly_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Week",
+                    usage_display_label(usage_display_percent(weekly_percent, show_as_used), show_as_used),
+                    provider.weekly_reset.as_deref(),
+                );
+            }
+        }
+        "cursor" => {
+            if let Some(auto_percent) = provider.weekly_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Auto+Composer",
+                    usage_display_label(usage_display_percent(auto_percent, show_as_used), show_as_used),
+                    None,
+                );
+            }
+            if let Some(api_percent) = provider.model_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "API",
+                    usage_display_label(usage_display_percent(api_percent, show_as_used), show_as_used),
+                    None,
+                );
+            }
+            draw_dashboard_stat(
+                ui,
+                "Total",
+                provider
+                    .session_percent
+                    .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+            );
+        }
+        "gemini" => {
+            draw_dashboard_stat(
+                ui,
+                "Pro",
+                provider
+                    .session_percent
+                    .map(|percent| {
+                        usage_display_label(usage_display_percent(percent, show_as_used), show_as_used)
+                    })
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+            );
+            if let Some(flash_percent) = provider.weekly_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Flash",
+                    usage_display_label(usage_display_percent(flash_percent, show_as_used), show_as_used),
+                    provider.weekly_reset.as_deref(),
+                );
+            }
+            if let Some(other_percent) = provider.model_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Other",
+                    usage_display_label(usage_display_percent(other_percent, show_as_used), show_as_used),
+                    provider.model_name.as_deref(),
+                );
+            }
+        }
+        _ => {
+            draw_dashboard_stat(
+                ui,
+                "Primary",
+                provider
+                    .session_percent
+                    .map(|percent| usage_display_label(usage_display_percent(percent, show_as_used), show_as_used))
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+            );
+            if let Some(secondary_percent) = provider.weekly_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Secondary",
+                    usage_display_label(usage_display_percent(secondary_percent, show_as_used), show_as_used),
+                    provider.weekly_reset.as_deref(),
+                );
+            }
+            if let Some(model_percent) = provider.model_percent {
+                draw_dashboard_stat(
+                    ui,
+                    "Model",
+                    usage_display_label(usage_display_percent(model_percent, show_as_used), show_as_used),
+                    provider.model_name.as_deref(),
+                );
+            }
+        }
+    }
+
+    if let Some(cost) = provider.cost_used.as_ref() {
+        draw_dashboard_stat(ui, "Spend", cost.clone(), None);
+    }
+
+    if let Some(plan) = provider.plan.as_ref() {
+        draw_dashboard_stat(ui, "Plan", plan.clone(), None);
+    }
+}
+
 /// Draw a provider detail card - macOS UsageMenuCardView style
 /// Structure: Header -> Divider -> Metrics (Session, Weekly, Model) -> Credits -> Cost
 /// Returns (refresh_requested, account_switch_provider_name)
@@ -1971,54 +2298,176 @@ fn draw_provider_detail_card(
         if has_metrics {
             ui.add_space(10.0);
 
-            // Session metric (primary) - no pace indicator for session
-            if let Some(session_pct) = provider.session_percent {
-                draw_metric_row(
-                    ui,
-                    "Session",
-                    session_pct,
-                    show_as_used,
-                    provider.session_reset.as_deref(),
-                    brand_color,
-                    content_width,
-                    None, // No pace for session
-                    false,
-                );
-            }
+            match provider.name.as_str() {
+                "codex" => {
+                    if let Some(session_pct) = provider.session_percent {
+                        draw_metric_row(
+                            ui,
+                            "5h Window",
+                            session_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
 
-            // Weekly metric (secondary) - includes pace indicator
-            if let Some(weekly_pct) = provider.weekly_percent {
-                ui.add_space(12.0);
+                    if let Some(weekly_pct) = provider.weekly_percent {
+                        ui.add_space(12.0);
+                        draw_metric_row(
+                            ui,
+                            "Weekly",
+                            weekly_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            provider.pace_percent,
+                            provider.pace_lasts_to_reset,
+                        );
+                    }
+                }
+                "cursor" => {
+                    if let Some(auto_pct) = provider.weekly_percent {
+                        draw_metric_row(
+                            ui,
+                            "Auto + Composer",
+                            auto_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
 
-                draw_metric_row(
-                    ui,
-                    "Weekly",
-                    weekly_pct,
-                    show_as_used,
-                    provider.weekly_reset.as_deref(),
-                    brand_color,
-                    content_width,
-                    provider.pace_percent,
-                    provider.pace_lasts_to_reset,
-                );
-            }
+                    if let Some(api_pct) = provider.model_percent {
+                        ui.add_space(12.0);
+                        draw_metric_row(
+                            ui,
+                            "API",
+                            api_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
 
-            // Model-specific metric (tertiary) - no pace indicator
-            if let Some(model_pct) = provider.model_percent {
-                ui.add_space(12.0);
+                    if let Some(total_pct) = provider.session_percent {
+                        ui.add_space(12.0);
+                        draw_metric_summary_row(
+                            ui,
+                            "Total",
+                            total_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                        );
+                    }
+                }
+                "gemini" => {
+                    if let Some(pro_pct) = provider.session_percent {
+                        draw_metric_row(
+                            ui,
+                            "Gemini Pro",
+                            pro_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
 
-                let model_label = provider.model_name.as_deref().unwrap_or("Model");
-                draw_metric_row(
-                    ui,
-                    model_label,
-                    model_pct,
-                    show_as_used,
-                    None,
-                    brand_color,
-                    content_width,
-                    None, // No pace for model
-                    false,
-                );
+                    if let Some(flash_pct) = provider.weekly_percent {
+                        ui.add_space(12.0);
+                        draw_metric_row(
+                            ui,
+                            "Gemini Flash",
+                            flash_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            Color32::from_rgba_unmultiplied(
+                                brand_color.r(),
+                                brand_color.g(),
+                                brand_color.b(),
+                                190,
+                            ),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+
+                    if let Some(other_pct) = provider.model_percent {
+                        ui.add_space(12.0);
+                        draw_metric_row(
+                            ui,
+                            provider.model_name.as_deref().unwrap_or("Other Models"),
+                            other_pct,
+                            show_as_used,
+                            None,
+                            Color32::from_rgba_unmultiplied(255, 255, 255, 165),
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+                }
+                _ => {
+                    if let Some(session_pct) = provider.session_percent {
+                        draw_metric_row(
+                            ui,
+                            "Session",
+                            session_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+
+                    if let Some(weekly_pct) = provider.weekly_percent {
+                        ui.add_space(12.0);
+
+                        draw_metric_row(
+                            ui,
+                            "Weekly",
+                            weekly_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            brand_color,
+                            content_width,
+                            provider.pace_percent,
+                            provider.pace_lasts_to_reset,
+                        );
+                    }
+
+                    if let Some(model_pct) = provider.model_percent {
+                        ui.add_space(12.0);
+
+                        let model_label = provider.model_name.as_deref().unwrap_or("Model");
+                        draw_metric_row(
+                            ui,
+                            model_label,
+                            model_pct,
+                            show_as_used,
+                            None,
+                            brand_color,
+                            content_width,
+                            None,
+                            false,
+                        );
+                    }
+                }
             }
 
             ui.add_space(2.0);
@@ -2267,6 +2716,51 @@ fn draw_horizontal_separator(ui: &mut egui::Ui, left_padding: f32) {
     });
 }
 
+fn draw_metric_summary_row(
+    ui: &mut egui::Ui,
+    title: &str,
+    percent: f64,
+    show_as_used: bool,
+    reset_text: Option<&str>,
+) {
+    ui.horizontal(|ui| {
+        ui.label(
+            RichText::new(title)
+                .size(FontSize::BASE)
+                .color(Theme::text_primary())
+                .strong(),
+        );
+        ui.add_space(8.0);
+        ui.label(
+            RichText::new(usage_display_label(
+                usage_display_percent(percent, show_as_used),
+                show_as_used,
+            ))
+            .size(FontSize::SM)
+            .color(Theme::text_primary()),
+        );
+
+        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+            if let Some(reset) = reset_text {
+                ui.label(
+                    RichText::new(format!("Resets in {}", reset))
+                        .size(FontSize::XS)
+                        .color(Theme::text_secondary()),
+                );
+            }
+        });
+    });
+}
+
+fn section_header_inline(ui: &mut egui::Ui, title: &str) {
+    ui.label(
+        RichText::new(title)
+            .size(FontSize::XS)
+            .color(Theme::text_muted())
+            .strong(),
+    );
+}
+
 /// Draw a text-only menu item (Settings, About, Quit style)
 fn draw_text_menu_item(ui: &mut egui::Ui, label: &str) -> bool {
     let available_width = ui.available_width();
@@ -2456,16 +2950,20 @@ pub fn run() -> anyhow::Result<()> {
         }
     }
 
+    let settings = Settings::load();
+    let mut viewport = egui::ViewportBuilder::default()
+        .with_inner_size([560.0, 720.0])
+        .with_min_inner_size([460.0, 540.0])
+        .with_clamp_size_to_monitor_size(true)
+        .with_resizable(true)
+        .with_decorations(true)
+        .with_transparent(false)
+        .with_title("CodexBar");
+    if settings.always_on_top {
+        viewport = viewport.with_always_on_top();
+    }
     let options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_inner_size([360.0, 500.0])
-            .with_min_inner_size([320.0, 320.0])
-            .with_clamp_size_to_monitor_size(true)
-            .with_resizable(true)
-            .with_decorations(true)
-            .with_transparent(false)
-            .with_always_on_top()
-            .with_title("CodexBar"),
+        viewport,
         persist_window: false, // Don't persist window state
         ..Default::default()
     };

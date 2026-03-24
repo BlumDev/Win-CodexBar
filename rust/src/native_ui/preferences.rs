@@ -383,6 +383,19 @@ impl PreferencesWindow {
                 self.settings.start_minimized = start_minimized;
                 self.settings_changed = true;
             }
+
+            setting_divider(ui);
+
+            let mut always_on_top = self.settings.always_on_top;
+            if setting_toggle(
+                ui,
+                "Always on top",
+                "Keep the main window above other windows (applies after restart)",
+                &mut always_on_top,
+            ) {
+                self.settings.always_on_top = always_on_top;
+                self.settings_changed = true;
+            }
         });
 
         ui.add_space(Spacing::LG);
@@ -3335,6 +3348,26 @@ fn render_general_tab(ui: &mut egui::Ui, shared_state: &Arc<Mutex<PreferencesSha
         ) {
             if let Ok(mut state) = shared_state.lock() {
                 state.settings.start_minimized = start_minimized;
+                state.settings_changed = true;
+            }
+        }
+
+        setting_divider(ui);
+
+        let mut always_on_top = if let Ok(state) = shared_state.lock() {
+            state.settings.always_on_top
+        } else {
+            false
+        };
+
+        if setting_toggle(
+            ui,
+            "Always on top",
+            "Keep the main window above other windows (applies after restart)",
+            &mut always_on_top,
+        ) {
+            if let Ok(mut state) = shared_state.lock() {
+                state.settings.always_on_top = always_on_top;
                 state.settings_changed = true;
             }
         }

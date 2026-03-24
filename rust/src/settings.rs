@@ -134,6 +134,9 @@ pub struct Settings {
     /// Whether to start minimized
     pub start_minimized: bool,
 
+    /// Keep the main window above other windows
+    pub always_on_top: bool,
+
     /// Whether to start at login
     pub start_at_login: bool,
 
@@ -219,6 +222,7 @@ impl Default for Settings {
             enabled_providers: enabled,
             refresh_interval_secs: 300, // 5 minutes
             start_minimized: false,
+            always_on_top: false,
             start_at_login: false,
             show_notifications: true,
             sound_enabled: true,
