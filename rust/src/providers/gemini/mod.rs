@@ -26,8 +26,8 @@ impl GeminiProvider {
             metadata: ProviderMetadata {
                 id: ProviderId::Gemini,
                 display_name: "Gemini",
-                session_label: "Daily",
-                weekly_label: "Daily",
+                session_label: "Gemini Pro",
+                weekly_label: "Flash",
                 supports_opus: false,
                 supports_credits: false,
                 default_enabled: true,
@@ -60,8 +60,11 @@ impl Provider for GeminiProvider {
         tracing::debug!("Fetching Gemini usage via API");
 
         match self.api.fetch_quota(ctx).await {
-            Ok((primary, model_specific, email)) => {
+            Ok((primary, secondary, model_specific, email)) => {
                 let mut usage = UsageSnapshot::new(primary);
+                if let Some(sec) = secondary {
+                    usage = usage.with_secondary(sec);
+                }
                 if let Some(ms) = model_specific {
                     usage = usage.with_model_specific(ms);
                 }

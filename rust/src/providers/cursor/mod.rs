@@ -55,10 +55,24 @@ impl Provider for CursorProvider {
         &self.metadata
     }
 
-    async fn fetch_usage(&self, _ctx: &FetchContext) -> Result<ProviderFetchResult, ProviderError> {
+    async fn fetch_usage(
+        &self,
+        ctx: &FetchContext,
+    ) -> Result<ProviderFetchResult, ProviderError> {
         tracing::debug!("Fetching Cursor usage via web API");
 
-        match self.api.fetch_usage().await {
+        let fetch = if let Some(ref cookie_header) = ctx.manual_cookie_header {
+            if !cookie_header.trim().is_empty() {
+                tracing::debug!("Using manual cookie header for Cursor");
+                self.api.fetch_usage_with_cookie_header(cookie_header).await
+            } else {
+                self.api.fetch_usage().await
+            }
+        } else {
+            self.api.fetch_usage().await
+        };
+
+        match fetch {
             Ok((primary, secondary, model_specific, cost, email, plan_type)) => {
                 let mut usage = UsageSnapshot::new(primary);
                 if let Some(sec) = secondary {

@@ -46,6 +46,10 @@ impl AntigravityProvider {
 
         let mut cmd = Command::new("powershell.exe");
         cmd.args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-WindowStyle", "Hidden",
                 "-ExecutionPolicy", "Bypass",
                 "-Command",
                 "Get-CimInstance Win32_Process | Where-Object { $_.Name -like '*language_server_windows*' } | Select-Object -ExpandProperty CommandLine"
@@ -95,6 +99,27 @@ impl AntigravityProvider {
         ))
     }
 
+    async fn probe_endpoint(
+        client: &reqwest::Client,
+        scheme: &str,
+        port: u16,
+        path: &str,
+        csrf_token: Option<&str>,
+        body: &serde_json::Value,
+    ) -> Result<reqwest::Response, reqwest::Error> {
+        let url = format!("{scheme}://127.0.0.1:{port}{path}");
+        let mut request = client
+            .post(&url)
+            .header("Content-Type", "application/json")
+            .header("Connect-Protocol-Version", "1");
+
+        if let Some(token) = csrf_token {
+            request = request.header("X-Codeium-Csrf-Token", token);
+        }
+
+        request.json(body).send().await
+    }
+
     /// Find the actual API port by checking listening ports
     async fn find_api_port(extension_port: u16) -> Result<u16, ProviderError> {
         // The language server listens on multiple ports near the extension port
@@ -109,45 +134,43 @@ impl AntigravityProvider {
             .build()
             .map_err(|e| ProviderError::Other(e.to_string()))?;
 
+        let probe_body = serde_json::json!({});
         for offset in 0..20 {
             let port = extension_port + offset;
-            let url = format!(
-                "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/GetUnleashData",
-                port
-            );
-
-            // Just check if the port responds (even with error)
-            if let Ok(resp) = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Connect-Protocol-Version", "1")
-                .body("{}")
-                .send()
+            for scheme in ["https", "http"] {
+                if let Ok(resp) = Self::probe_endpoint(
+                    &client,
+                    scheme,
+                    port,
+                    "/exa.language_server_pb.LanguageServerService/GetUnleashData",
+                    None,
+                    &probe_body,
+                )
                 .await
-            {
-                // If we get any response (even error), this is the API port
-                if resp.status().as_u16() == 200 || resp.status().as_u16() == 401 {
-                    return Ok(port);
+                {
+                    if resp.status().as_u16() == 200 || resp.status().as_u16() == 401 {
+                        return Ok(port);
+                    }
                 }
             }
         }
 
         // Fallback: try common ports
         for port in [53835, 53836, 53837, 53838, 53845, 53849] {
-            let url = format!(
-                "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/GetUnleashData",
-                port
-            );
-            if let Ok(resp) = client
-                .post(&url)
-                .header("Content-Type", "application/json")
-                .header("Connect-Protocol-Version", "1")
-                .body("{}")
-                .send()
+            for scheme in ["https", "http"] {
+                if let Ok(resp) = Self::probe_endpoint(
+                    &client,
+                    scheme,
+                    port,
+                    "/exa.language_server_pb.LanguageServerService/GetUnleashData",
+                    None,
+                    &probe_body,
+                )
                 .await
-            {
-                if resp.status().as_u16() == 200 || resp.status().as_u16() == 401 {
-                    return Ok(port);
+                {
+                    if resp.status().as_u16() == 200 || resp.status().as_u16() == 401 {
+                        return Ok(port);
+                    }
                 }
             }
         }
@@ -170,11 +193,6 @@ impl AntigravityProvider {
             .build()
             .map_err(|e| ProviderError::Other(e.to_string()))?;
 
-        let url = format!(
-            "https://127.0.0.1:{}/exa.language_server_pb.LanguageServerService/GetUserStatus",
-            api_port
-        );
-
         let body = serde_json::json!({
             "metadata": {
                 "ideName": "antigravity",
@@ -184,15 +202,35 @@ impl AntigravityProvider {
             }
         });
 
-        let resp = client
-            .post(&url)
-            .header("Content-Type", "application/json")
-            .header("Connect-Protocol-Version", "1")
-            .header("X-Codeium-Csrf-Token", &process_info.csrf_token)
-            .json(&body)
-            .send()
+        let mut last_error = None;
+        let mut response = None;
+        for scheme in ["https", "http"] {
+            match Self::probe_endpoint(
+                &client,
+                scheme,
+                api_port,
+                "/exa.language_server_pb.LanguageServerService/GetUserStatus",
+                Some(&process_info.csrf_token),
+                &body,
+            )
             .await
-            .map_err(|e| ProviderError::Other(format!("API request failed: {}", e)))?;
+            {
+                Ok(resp) => {
+                    response = Some(resp);
+                    break;
+                }
+                Err(e) => last_error = Some(e),
+            }
+        }
+
+        let resp = response.ok_or_else(|| {
+            ProviderError::Other(format!(
+                "API request failed: {}",
+                last_error
+                    .map(|e| e.to_string())
+                    .unwrap_or_else(|| "unknown error".to_string())
+            ))
+        })?;
 
         if !resp.status().is_success() {
             let status = resp.status();

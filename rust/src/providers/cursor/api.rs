@@ -36,11 +36,22 @@ impl CursorApi {
     pub async fn fetch_usage(&self) -> Result<CursorUsageResult, ProviderError> {
         // Try to get cookies from browser
         let cookie_header = self.get_cookie_header()?;
+        self.fetch_usage_with_cookie_header(&cookie_header).await
+    }
+
+    /// Fetch usage information using an explicit cookie header
+    pub async fn fetch_usage_with_cookie_header(
+        &self,
+        cookie_header: &str,
+    ) -> Result<CursorUsageResult, ProviderError> {
+        if cookie_header.trim().is_empty() {
+            return Err(ProviderError::NoCookies);
+        }
 
         // Fetch usage summary and user info in parallel
         let (usage_result, user_result) = tokio::join!(
-            self.fetch_usage_summary(&cookie_header),
-            self.fetch_user_info(&cookie_header)
+            self.fetch_usage_summary(cookie_header),
+            self.fetch_user_info(cookie_header)
         );
 
         let usage_summary = usage_result?;
@@ -145,19 +156,37 @@ impl CursorApi {
                         .or(plan.limit)
                         .unwrap_or(0) as f64;
 
-                    let percent = if limit_cents > 0.0 {
+                    let percent = if let Some(total_percent) = plan.total_percent_used {
+                        normalize_cursor_percent(total_percent)
+                    } else if summary.is_unlimited == Some(true) {
+                        0.0
+                    } else if limit_cents > 0.0 {
                         (used_cents / limit_cents) * 100.0
                     } else {
-                        plan.total_percent_used.unwrap_or(0.0) * 100.0
+                        0.0
                     };
 
                     let secondary = plan
                         .auto_percent_used
-                        .map(|v| RateWindow::with_details(v * 100.0, None, billing_end, None));
+                        .map(|v| {
+                            RateWindow::with_details(
+                                normalize_cursor_percent(v),
+                                None,
+                                billing_end,
+                                None,
+                            )
+                        });
 
                     let model_specific = plan
                         .api_percent_used
-                        .map(|v| RateWindow::with_details(v * 100.0, None, billing_end, None));
+                        .map(|v| {
+                            RateWindow::with_details(
+                                normalize_cursor_percent(v),
+                                None,
+                                billing_end,
+                                None,
+                            )
+                        });
 
                     let mut cost = CostSnapshot::new(used_cents / 100.0, "USD", "Monthly");
                     if limit_cents > 0.0 {
@@ -298,6 +327,15 @@ fn capitalize(s: &str) -> String {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
     }
+}
+
+fn normalize_cursor_percent(value: f64) -> f64 {
+    if !value.is_finite() {
+        return 0.0;
+    }
+
+    let percent = if value <= 1.0 { value * 100.0 } else { value };
+    percent.clamp(0.0, 100.0)
 }
 
 #[cfg(test)]

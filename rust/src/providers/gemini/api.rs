@@ -25,12 +25,21 @@ impl GeminiApi {
     }
 
     /// Fetch quota information from the Gemini API
-    /// Returns (primary RateWindow, optional model-specific RateWindow, optional email)
+    /// Returns (primary RateWindow, optional secondary RateWindow, optional model-specific
+    /// RateWindow, optional email)
     /// Note: Gemini quota API requires OAuth tokens, not API keys
     pub async fn fetch_quota(
         &self,
         _ctx: &FetchContext,
-    ) -> Result<(RateWindow, Option<RateWindow>, Option<String>), ProviderError> {
+    ) -> Result<
+        (
+            RateWindow,
+            Option<RateWindow>,
+            Option<RateWindow>,
+            Option<String>,
+        ),
+        ProviderError,
+    > {
         // Gemini quota endpoint requires OAuth credentials (not API keys)
         // Always load OAuth credentials from ~/.gemini/oauth_creds.json
         let mut creds = self.load_credentials()?;
@@ -196,7 +205,15 @@ impl GeminiApi {
         &self,
         response: QuotaResponse,
         creds: Option<&OAuthCredentials>,
-    ) -> Result<(RateWindow, Option<RateWindow>, Option<String>), ProviderError> {
+    ) -> Result<
+        (
+            RateWindow,
+            Option<RateWindow>,
+            Option<RateWindow>,
+            Option<String>,
+        ),
+        ProviderError,
+    > {
         let buckets = response
             .buckets
             .ok_or_else(|| ProviderError::Parse("No quota buckets in response".to_string()))?;
@@ -218,64 +235,50 @@ impl GeminiApi {
             }
         }
 
-        // Find Flash and Pro quotas
-        let flash_quota = model_quotas
-            .iter()
-            .filter(|(k, _)| k.to_lowercase().contains("flash"))
-            .min_by(|a, b| {
-                a.1 .0
-                    .partial_cmp(&b.1 .0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        let mut pro_quota: Option<(f64, Option<String>)> = None;
+        let mut flash_quota: Option<(f64, Option<String>)> = None;
+        let mut other_quota: Option<(f64, Option<String>)> = None;
 
-        let pro_quota = model_quotas
-            .iter()
-            .filter(|(k, _)| k.to_lowercase().contains("pro"))
-            .min_by(|a, b| {
-                a.1 .0
-                    .partial_cmp(&b.1 .0)
-                    .unwrap_or(std::cmp::Ordering::Equal)
-            });
+        for (model_id, (fraction, reset)) in &model_quotas {
+            let model_lower = model_id.to_lowercase();
+            let target = if model_lower.contains("flash") {
+                &mut flash_quota
+            } else if model_lower.contains("pro") {
+                &mut pro_quota
+            } else {
+                &mut other_quota
+            };
 
-        // Build primary RateWindow from the most constrained quota
-        let (primary_fraction, primary_reset) = if let Some((_, (frac, reset))) = pro_quota {
-            (*frac, reset.clone())
-        } else if let Some((_, (frac, reset))) = flash_quota {
-            (*frac, reset.clone())
-        } else if let Some((_, (frac, reset))) = model_quotas.iter().next() {
-            (*frac, reset.clone())
-        } else {
-            (1.0, None)
-        };
+            match target {
+                Some((existing_fraction, _)) if *existing_fraction <= *fraction => {}
+                _ => *target = Some((*fraction, reset.clone())),
+            }
+        }
 
-        let primary_percent_used = (1.0 - primary_fraction) * 100.0;
-        let primary_reset_at = primary_reset.as_ref().and_then(|s| parse_iso_date(s));
-
-        let primary = RateWindow::with_details(
-            primary_percent_used,
-            Some(1440), // 24 hours
-            primary_reset_at,
-            None,
+        let primary = quota_window_from_tuple(
+            pro_quota
+                .clone()
+                .or_else(|| flash_quota.clone())
+                .or_else(|| other_quota.clone())
+                .unwrap_or((1.0, None)),
         );
-
-        // Model-specific window for Flash if Pro is primary
-        let model_specific = if pro_quota.is_some() {
-            flash_quota.map(|(_, (frac, reset))| {
-                let percent_used = (1.0 - frac) * 100.0;
-                let reset_at = reset.as_ref().and_then(|s| parse_iso_date(s));
-                RateWindow::with_details(percent_used, Some(1440), reset_at, None)
-            })
-        } else {
-            None
-        };
+        let secondary = flash_quota.clone().map(quota_window_from_tuple);
+        let model_specific = other_quota.clone().map(quota_window_from_tuple);
 
         // Extract email from ID token
         let email = creds
             .and_then(|c| c.id_token.as_ref())
             .and_then(|token| extract_email_from_jwt(token));
 
-        Ok((primary, model_specific, email))
+        Ok((primary, secondary, model_specific, email))
     }
+}
+
+fn quota_window_from_tuple(input: (f64, Option<String>)) -> RateWindow {
+    let (fraction, reset) = input;
+    let percent_used = (1.0 - fraction) * 100.0;
+    let reset_at = reset.as_ref().and_then(|s| parse_iso_date(s));
+    RateWindow::with_details(percent_used, Some(1440), reset_at, None)
 }
 
 impl Default for GeminiApi {
