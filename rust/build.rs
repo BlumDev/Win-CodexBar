@@ -5,6 +5,15 @@
 use std::process::Command;
 
 fn main() {
+    #[cfg(target_os = "windows")]
+    {
+        let mut res = winresource::WindowsResource::new();
+        res.set_icon("icons/icon.ico");
+        if let Err(err) = res.compile() {
+            println!("cargo:warning=Failed to embed Windows icon resource: {}", err);
+        }
+    }
+
     // Get git commit hash
     let git_commit = Command::new("git")
         .args(["rev-parse", "--short", "HEAD"])

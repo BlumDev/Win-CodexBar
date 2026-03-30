@@ -201,6 +201,10 @@ pub struct Settings {
     /// Install pending updates when quitting the application
     #[serde(default)]
     pub install_updates_on_quit: bool,
+
+    /// Last dismissed upstream release tag (for suppressing repeated banners)
+    #[serde(default)]
+    pub ignored_update_version: Option<String>,
 }
 
 fn default_true() -> bool {
@@ -243,6 +247,7 @@ impl Default for Settings {
             global_shortcut: default_global_shortcut(), // Ctrl+Shift+U by default
             auto_download_updates: true, // Auto-download updates by default
             install_updates_on_quit: false, // Don't auto-install on quit by default
+            ignored_update_version: None,
         }
     }
 }

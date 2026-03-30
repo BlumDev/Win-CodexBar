@@ -117,6 +117,7 @@ winreg = "0.55"
 
 [build-dependencies]
 chrono = "0.4"
+winresource = "0.1"
 
 [dev-dependencies]
 tokio-test = "0.4"

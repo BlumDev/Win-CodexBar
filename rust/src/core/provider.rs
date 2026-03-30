@@ -100,7 +100,7 @@ impl ProviderId {
             ProviderId::Claude => "Claude",
             ProviderId::Cursor => "Cursor",
             ProviderId::Factory => "Factory",
-            ProviderId::Gemini => "Gemini",
+            ProviderId::Gemini => "Gemini CLI",
             ProviderId::Antigravity => "Antigravity",
             ProviderId::Copilot => "Copilot",
             ProviderId::Zai => "z.ai",

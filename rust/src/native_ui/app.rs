@@ -361,8 +361,21 @@ fn metric_severity_color(display_percent: f64) -> Color32 {
     Theme::usage_color(display_percent.clamp(0.0, 100.0))
 }
 
+fn severity_rank(color: Color32) -> u8 {
+    if color == Theme::GREEN {
+        0
+    } else if color == Theme::YELLOW {
+        1
+    } else if color == Theme::ORANGE {
+        2
+    } else {
+        3
+    }
+}
+
 fn pace_severity_color(display_percent: f64, pace_percent: Option<f64>) -> Color32 {
-    if let Some(delta) = pace_percent {
+    let usage_color = metric_severity_color(display_percent);
+    let pace_color = if let Some(delta) = pace_percent {
         let ahead = delta.max(0.0);
         if ahead <= 2.0 {
             Theme::GREEN
@@ -374,7 +387,13 @@ fn pace_severity_color(display_percent: f64, pace_percent: Option<f64>) -> Color
             Theme::RED
         }
     } else {
-        metric_severity_color(display_percent)
+        usage_color
+    };
+
+    if severity_rank(pace_color) >= severity_rank(usage_color) {
+        pace_color
+    } else {
+        usage_color
     }
 }
 
@@ -588,6 +607,7 @@ impl CodexBarApp {
             let state = Arc::clone(&state);
             let update_channel = settings.update_channel;
             let auto_download = settings.auto_download_updates;
+            let ignored_update_version = settings.ignored_update_version.clone();
             std::thread::spawn(move || {
                 let rt = match tokio::runtime::Runtime::new() {
                     Ok(rt) => rt,
@@ -600,6 +620,15 @@ impl CodexBarApp {
                     if let Some(update) =
                         updater::check_for_updates_with_channel(update_channel).await
                     {
+                        if ignored_update_version.as_deref() == Some(update.version.as_str()) {
+                            if let Ok(mut s) = state.lock() {
+                                s.update_available = None;
+                                s.update_checked = true;
+                                s.update_state = UpdateState::Idle;
+                            }
+                            return;
+                        }
+
                         let should_download = {
                             if let Ok(mut s) = state.lock() {
                                 s.update_available = Some(update.clone());
@@ -1349,6 +1378,7 @@ impl eframe::App for CodexBarApp {
                         // Trigger update check in background
                         let state = Arc::clone(&self.state);
                         let update_channel = self.settings.update_channel;
+                        let ignored_update_version = self.settings.ignored_update_version.clone();
                         std::thread::spawn(move || {
                             let rt = match tokio::runtime::Runtime::new() {
                                 Ok(rt) => rt,
@@ -1361,6 +1391,17 @@ impl eframe::App for CodexBarApp {
                                 if let Some(update) =
                                     updater::check_for_updates_with_channel(update_channel).await
                                 {
+                                    if ignored_update_version.as_deref()
+                                        == Some(update.version.as_str())
+                                    {
+                                        if let Ok(mut s) = state.lock() {
+                                            s.update_available = None;
+                                            s.update_checked = true;
+                                            s.update_state = UpdateState::Idle;
+                                        }
+                                        return;
+                                    }
+
                                     if let Ok(mut s) = state.lock() {
                                         s.update_available = Some(update);
                                         s.update_checked = true;
@@ -1462,6 +1503,14 @@ impl eframe::App for CodexBarApp {
                                                     .fill(Color32::TRANSPARENT)
                                                     .stroke(Stroke::NONE)
                                             ).clicked() {
+                                                self.settings.ignored_update_version =
+                                                    Some(update.version.clone());
+                                                if let Err(e) = self.settings.save() {
+                                                    tracing::error!(
+                                                        "Failed to save dismissed update version: {}",
+                                                        e
+                                                    );
+                                                }
                                                 if let Ok(mut s) = self.state.lock() {
                                                     s.update_dismissed = true;
                                                 }
@@ -3091,6 +3140,20 @@ fn draw_menu_item(ui: &mut egui::Ui, icon: &str, label: &str) -> bool {
     response.clicked()
 }
 
+fn load_window_icon() -> Option<egui::IconData> {
+    let png_bytes = include_bytes!("../../icons/icon.png");
+    let image = image::load_from_memory_with_format(png_bytes, image::ImageFormat::Png)
+        .ok()?
+        .into_rgba8();
+    let (width, height) = image.dimensions();
+
+    Some(egui::IconData {
+        rgba: image.into_raw(),
+        width,
+        height,
+    })
+}
+
 /// Run the application
 pub fn run() -> anyhow::Result<()> {
     // Delete any corrupted window state
@@ -3108,7 +3171,13 @@ pub fn run() -> anyhow::Result<()> {
         .with_clamp_size_to_monitor_size(true)
         .with_resizable(true)
         .with_decorations(true)
-        .with_transparent(false)
+        .with_transparent(false);
+
+    if let Some(icon) = load_window_icon() {
+        viewport = viewport.with_icon(icon);
+    }
+
+    viewport = viewport
         .with_title("CodexBar");
     if settings.always_on_top {
         viewport = viewport.with_always_on_top();
