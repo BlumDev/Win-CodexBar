@@ -62,30 +62,7 @@ impl KiroProvider {
 
     /// Find Kiro CLI binary
     fn which_kiro() -> Option<PathBuf> {
-        // Try kiro-cli first (the official CLI name)
-        if let Ok(path) = which::which("kiro-cli") {
-            return Some(path);
-        }
-        // Fall back to kiro
-        if let Ok(path) = which::which("kiro") {
-            return Some(path);
-        }
-
-        #[cfg(target_os = "windows")]
-        {
-            let possible_paths = [
-                dirs::data_local_dir()
-                    .map(|p| p.join("Programs").join("Kiro").join("kiro-cli.exe")),
-                Some(PathBuf::from("C:\\Program Files\\Kiro\\kiro-cli.exe")),
-            ];
-            for path in possible_paths.into_iter().flatten() {
-                if path.exists() {
-                    return Some(path);
-                }
-            }
-        }
-
-        None
+        version::find_kiro_cli()
     }
 
     /// Check if user is logged in by running `kiro-cli whoami`

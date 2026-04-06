@@ -1,632 +1,309 @@
-# Multi-Upstream Fork Management Strategy
+# Upstream Update Strategy
 
-**Fork:** topoffunnel/CodexBar  
-**Upstream 1:** steipete/CodexBar (original)  
-**Upstream 2:** nguyenphutrong/quotio (inspiration source)
+This document is the single source of truth for how the `BlumDev/Win-CodexBar` fork evaluates, records, and integrates upstream changes from `Finesssee/Win-CodexBar`.
 
----
+## Goals
 
-## 🎯 Core Principles
+- Avoid re-evaluating the same upstream release multiple times.
+- Keep a durable log of what we reviewed, what we adopted, and what we intentionally skipped.
+- Reduce merge risk by preferring small, well-scoped fork commits and selective upstream intake.
+- Make it obvious when we should cherry-pick, rebase, merge, or deliberately ignore a release.
 
-### Fork Independence
-- **Your fork is the primary development target**
-- Upstream contributions are optional and selective
-- You retain full credit for your innovations
-- Fork-specific features stay in the fork
+## Current Repository Model
 
-### Selective Contribution
-- Only contribute universally beneficial changes upstream
-- Keep attribution-sensitive improvements in fork
-- Submit small, focused PRs to increase merge likelihood
-- Don't contribute fork branding or identity
+- `origin`: `BlumDev/Win-CodexBar`
+- `upstream`: `Finesssee/Win-CodexBar`
+- Local development happens in the fork first.
+- In-app updater banners are treated as review prompts, not as approval to install upstream binaries.
 
-### Best-of-Both-Worlds
-- Monitor both upstreams for valuable changes
-- Cherry-pick features that enhance your fork
-- Adapt patterns without copying code
-- Credit sources appropriately
+## Working Rules
 
----
+### 1. Never use the in-app updater to overwrite the fork build
 
-## 🌳 Git Repository Structure
+The app may notify about upstream releases, but we do not install them directly through the built-in updater for this fork.
 
-### Remote Configuration
+Reason:
+- the upstream installer or binary can overwrite local fork-specific behavior
+- source control history would not reflect what changed
+- conflict resolution becomes harder after a blind binary update
 
-```bash
-# Your fork (origin)
-git remote add origin git@github.com:topoffunnel/CodexBar.git
+### 2. Evaluate upstream releases before integrating them
 
-# Original upstream (steipete)
-git remote add upstream git@github.com:steipete/CodexBar.git
+For every upstream release we check:
+- what changed
+- whether it matters for this fork
+- whether the change overlaps heavily with our modified files
+- whether the change is better cherry-picked, merged, or ignored
 
-# Quotio inspiration source
-git remote add quotio git@github.com:nguyenphutrong/quotio.git
+### 3. Prefer selective intake over broad merges
 
-# Verify remotes
-git remote -v
+Default preference order:
+1. cherry-pick isolated upstream commits
+2. manual reimplementation of a small upstream fix
+3. dedicated integration branch from `upstream/main`
+4. full upstream merge only when we intentionally resync a large portion of the fork
+
+### 4. Keep fork commits small and topic-based
+
+The smaller and cleaner our fork commits are, the easier future upstream sync becomes.
+
+Practical rule:
+- separate UI, auth, updater, provider, and build-system work into different commits when possible
+
+### 5. Record every reviewed release here
+
+Every time we review an upstream release, add an entry to the ledger below with:
+- date reviewed
+- upstream version
+- summary of upstream change
+- decision
+- rationale
+- follow-up action, if any
+
+## Decision Matrix
+
+### Cherry-pick directly
+
+Use when:
+- the upstream change is isolated
+- files do not overlap much with fork customizations
+- the change is clearly useful and low risk
+
+Examples:
+- pricing table update
+- one provider parser fix
+- one reset-time parsing fix
+
+### Reimplement locally
+
+Use when:
+- the upstream idea is useful
+- but the exact commit would conflict heavily with our fork changes
+
+Examples:
+- small UI fix in a heavily customized screen
+- updater tweak in a file we already rewired
+
+### Integration branch from `upstream/main`
+
+Use when:
+- several upstream releases accumulated
+- a release includes important structural or dependency changes
+- direct cherry-picking would be messier than replaying our fork changes
+
+Recommended flow:
+1. create branch from latest `upstream/main`
+2. identify our fork-only commits
+3. replay them one by one
+4. resolve conflicts deliberately
+5. verify build and key providers
+6. merge back into fork `main`
+
+### Skip for now
+
+Use when:
+- the release does not matter for our deployment model
+- the release is mostly packaging or localization we do not need
+- integration cost is higher than value
+
+Skipping is valid. It should still be documented here.
+
+## How To Review a New Upstream Release
+
+Recommended review checklist:
+1. fetch upstream tags and commits
+2. inspect changelog or release notes
+3. inspect commit list and changed files
+4. classify: relevant, optional, or not relevant
+5. decide: cherry-pick, reimplement, integration branch, or skip
+6. log the decision in this document
+
+Useful commands in PowerShell at `D:\Apps\Win-CodexBar`:
+
+```powershell
+git fetch upstream --tags
+git log --oneline --decorate main..upstream/main
+git diff --stat <old-tag>..<new-tag>
+git show <commit>
 ```
 
-### Branch Strategy
+## What Happens If We Ignore Upstream Too Long?
 
-```
-main (your fork's stable branch)
-├── feature/* (fork-specific features)
-├── upstream-sync/* (tracking upstream changes)
-├── quotio-inspired/* (features inspired by quotio)
-└── upstream-pr/* (branches for upstream PRs)
-```
+Yes, the risk goes up over time.
 
-**Branch Types:**
-- `main` - Your fork's stable release branch
-- `feature/*` - Fork-specific development
-- `upstream-sync/*` - Temporary branches for reviewing upstream changes
-- `quotio-inspired/*` - Features adapted from quotio patterns
-- `upstream-pr/*` - Clean branches for upstream contributions
+Main reasons:
+- dependency drift
+- installer or packaging changes that may become prerequisites later
+- broader file overlap in `app.rs`, `preferences.rs`, provider modules, and updater logic
+- harder conflict resolution if both sides touched the same architecture repeatedly
 
----
+That said, it only becomes dangerous if we also let our own fork changes grow in large, mixed commits.
 
-## 🔄 Workflow 1: Monitoring Upstream Changes
+### Risk controls
 
-### Daily/Weekly Sync Check
+To keep long-term sync manageable:
+- review upstream regularly, even if we do not integrate immediately
+- keep this ledger up to date
+- keep our own commits scoped and descriptive
+- do a periodic upstream replay branch when several relevant releases pile up
+- avoid bundling unrelated fork work into one giant commit
 
-```bash
-#!/bin/bash
-# Scripts/check_upstreams.sh
+### Escalation threshold
 
-echo "==> Fetching upstream changes..."
-git fetch upstream
-git fetch quotio
+Create a dedicated integration branch from `upstream/main` when any of these happens:
+- 3 or more relevant upstream releases accumulated
+- upstream changes core dependencies or build chain
+- upstream changes the same UI files we changed repeatedly
+- a security, auth, or provider-breaking fix lands upstream
 
-echo ""
-echo "==> Upstream (steipete) changes:"
-git log --oneline main..upstream/main --no-merges | head -20
+## Integration Playbook for a Future Important Update
 
-echo ""
-echo "==> Quotio changes:"
-git log --oneline --all --remotes=quotio/main --since="1 week ago" | head -20
+If a genuinely important upstream release lands after a long gap:
 
-echo ""
-echo "==> Files changed in upstream:"
-git diff --stat main..upstream/main
+1. do not install via app updater
+2. create `codex/upstream-resync-YYYYMMDD`
+3. branch from latest `upstream/main`
+4. list fork-only commits
+5. replay or reimplement fork changes in priority order:
+   - build/toolchain
+   - auth and provider fixes
+   - updater behavior
+   - dashboard/UI refinements
+6. run validation on the rebuilt app
+7. merge back into fork `main`
+8. record the result in this ledger
 
-echo ""
-echo "==> Files changed in quotio (recent):"
-git diff --stat quotio/main~10..quotio/main
-```
+## Fork-Specific Decisions Already In Place
 
-### Automated Monitoring (GitHub Actions)
+These decisions affect future update handling:
+- taskbar icon is embedded in the fork build via Windows resource embedding
+- identical upstream release banners can be dismissed persistently via `ignored_update_version`
+- `Gemini` is labeled `Gemini CLI` in the fork UI
+- several provider quota visualizations differ from upstream
+- the fork uses the GNU target build path on this machine
 
-Create `.github/workflows/upstream-monitor.yml`:
+These are likely conflict hotspots during future upstream UI or updater work.
 
-```yaml
-name: Monitor Upstreams
+## Update Ledger
 
-on:
-  schedule:
-    - cron: '0 9 * * 1,4'  # Monday and Thursday at 9 AM
-  workflow_dispatch:
+### 2026-03-22 to 2026-03-24: fork customization phase
 
-jobs:
-  check-upstream:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-      
-      - name: Add upstream remotes
-        run: |
-          git remote add upstream https://github.com/steipete/CodexBar.git
-          git remote add quotio https://github.com/nguyenphutrong/quotio.git
-          git fetch upstream
-          git fetch quotio
-      
-      - name: Check for new commits
-        id: check
-        run: |
-          UPSTREAM_NEW=$(git log --oneline main..upstream/main --no-merges | wc -l)
-          QUOTIO_NEW=$(git log --oneline --all --remotes=quotio/main --since="1 week ago" | wc -l)
-          
-          echo "upstream_commits=$UPSTREAM_NEW" >> $GITHUB_OUTPUT
-          echo "quotio_commits=$QUOTIO_NEW" >> $GITHUB_OUTPUT
-      
-      - name: Create issue if changes detected
-        if: steps.check.outputs.upstream_commits > 0 || steps.check.outputs.quotio_commits > 0
-        uses: actions/github-script@v7
-        with:
-          script: |
-            const upstreamCommits = '${{ steps.check.outputs.upstream_commits }}';
-            const quotioCommits = '${{ steps.check.outputs.quotio_commits }}';
-            
-            const body = `## Upstream Changes Detected
-            
-            **steipete/CodexBar:** ${upstreamCommits} new commits
-            **quotio:** ${quotioCommits} new commits (last week)
-            
-            Review changes:
-            - [steipete commits](https://github.com/steipete/CodexBar/compare/main...upstream/main)
-            - [quotio commits](https://github.com/nguyenphutrong/quotio/commits/main)
-            
-            Run \`./Scripts/review_upstream.sh\` to analyze changes.`;
-            
-            github.rest.issues.create({
-              owner: context.repo.owner,
-              repo: context.repo.repo,
-              title: 'Upstream Changes Available',
-              body: body,
-              labels: ['upstream-sync']
-            });
-```
+Reviewed area:
+- local fork-only changes, not a formal upstream release intake
 
----
+Key fork changes added:
+- provider quota handling refinements
+- redesigned dashboard
+- GNU target build default on this Windows machine
+- persistent ignored update banners
+- embedded Windows app icon
+- `Gemini CLI` naming
+- quota severity color logic
 
-## 🔍 Workflow 2: Reviewing & Incorporating Changes
+Result:
+- fork diverged intentionally from upstream UI and updater behavior
 
-### Step 1: Review Upstream Changes
+### 2026-03-24: upstream v1.2.3
 
-```bash
-#!/bin/bash
-# Scripts/review_upstream.sh
+Summary:
+- useful smaller fixes including Codex code review reset handling and GPT-5.4 pricing updates
 
-UPSTREAM=${1:-upstream}  # 'upstream' or 'quotio'
+Decision:
+- partially adopt useful isolated ideas
 
-echo "==> Creating review branch for $UPSTREAM..."
-git checkout main
-git checkout -b upstream-sync/$UPSTREAM-$(date +%Y%m%d)
+Rationale:
+- several changes were low-risk and easy to integrate
+- large UI/state changes were not worth taking wholesale
 
-echo "==> Fetching latest..."
-git fetch $UPSTREAM
+Outcome:
+- selected useful concepts were integrated into the fork
+- broad upstream UI changes were not merged as a whole
 
-echo "==> Showing commits to review:"
-git log --oneline --graph main..$UPSTREAM/main | head -30
+### 2026-03-29: upstream v1.2.5
 
-echo ""
-echo "==> Detailed diff:"
-git diff main..$UPSTREAM/main --stat
+Summary:
+- Simplified Chinese localization across Windows UI
+- CJK fallback fonts for localized rendering
+- localized reset and status string fixes
 
-echo ""
-echo "Next steps:"
-echo "1. Review commits: git log -p main..$UPSTREAM/main"
-echo "2. Cherry-pick specific commits: git cherry-pick <commit-hash>"
-echo "3. Or merge all: git merge $UPSTREAM/main"
-echo "4. Test thoroughly"
-echo "5. Merge to main: git checkout main && git merge upstream-sync/$UPSTREAM-$(date +%Y%m%d)"
-```
+Decision:
+- skipped for now
 
-### Step 2: Selective Cherry-Picking
+Rationale:
+- low value for this fork's immediate goals
+- high overlap with heavily customized UI files
+- did not solve our active fork issues
 
-```bash
-# Review individual commits
-git log -p main..upstream/main
+Outcome:
+- no upstream merge performed
+- fork kept its own UI and updater path
 
-# Cherry-pick specific valuable commits
-git cherry-pick <commit-hash>
+### 2026-03-31: upstream v1.2.8
 
-# If conflicts, resolve and continue
-git cherry-pick --continue
+Summary:
+- installer/runtime packaging fix: bundle Microsoft Visual C++ Redistributable for Windows installs
 
-# Or abort if not suitable
-git cherry-pick --abort
-```
+Decision:
+- skipped for current fork workflow
 
-### Step 3: Quotio Pattern Adaptation
+Rationale:
+- this fork is built and run locally with the GNU toolchain on this machine
+- change is relevant mainly for official installer-based deployment
+- not important enough to justify an upstream integration cycle right now
 
-```bash
-# Create inspiration branch
-git checkout -b quotio-inspired/feature-name
+Outcome:
+- review completed
+- no source integration required at this time
 
-# View quotio implementation (read-only)
-git show quotio/main:path/to/file.swift
+### 2026-04-06: upstream v1.2.12
 
-# Implement similar pattern in your codebase
-# (write your own code, don't copy)
+Summary:
+- release notes advertise updater hardening, CLI path hardening, Kiro path hardening, Infini provider support, and several CLI/provider fixes
+- the tagged commit history and release notes are not perfectly aligned, so `upstream/main` was reviewed directly instead of trusting the tag range blindly
 
-# Commit with attribution
-git commit -m "feat: implement feature inspired by quotio
+Decision:
+- partially adopt useful isolated ideas
 
-Inspired by quotio's approach to [feature]:
-https://github.com/nguyenphutrong/quotio/commit/abc123
+Rationale:
+- the security-oriented hardening changes were low-risk and useful in the fork
+- the Claude session-key fix was useful and isolated
+- larger provider/UI additions such as Infini, NanoGPT, and summary-view work were intentionally skipped because they overlap with fork-specific UI and product direction
 
-Implemented independently with CodexBar-specific patterns."
+Outcome:
+- adopted:
+  - updater SHA256 verification via release metadata
+  - safer CLI binary resolution to avoid CWD-hijack style path resolution
+  - hardened Kiro CLI discovery with validated PATH/install-location lookup and explicit env override
+  - Claude session env-key support and browser-like request headers
+- skipped for now:
+  - Infini provider
+  - NanoGPT provider
+  - upstream summary-view UI
+- sync risk remains moderate in `app.rs` and other UI files, but this intake stayed focused on non-UI security/provider surfaces
+
+## Future Ledger Entry Template
+
+```markdown
+### YYYY-MM-DD: upstream vX.Y.Z
+
+Summary:
+- 
+
+Decision:
+- cherry-pick / reimplement / integration branch / skip
+
+Rationale:
+- 
+
+Outcome:
+- 
 ```
 
----
+## Maintenance Rule
 
-## 📤 Workflow 3: Contributing to Upstream
+Whenever we review an upstream release, update this file in the same session.
 
-### Identifying Upstream-Suitable Changes
-
-**✅ Good for Upstream:**
-- Bug fixes that affect all users
-- Performance improvements
-- Provider enhancements (non-fork-specific)
-- Documentation improvements
-- Test coverage additions
-- Dependency updates
-
-**❌ Keep in Fork:**
-- Fork branding/attribution
-- Multi-account management (major architectural change)
-- Fork-specific UI customizations
-- Experimental features
-- topoffunnel.com-specific integrations
-
-### Creating Upstream PR Branch
-
-```bash
-#!/bin/bash
-# Scripts/prepare_upstream_pr.sh
-
-FEATURE_NAME=$1
-
-if [ -z "$FEATURE_NAME" ]; then
-  echo "Usage: ./Scripts/prepare_upstream_pr.sh <feature-name>"
-  exit 1
-fi
-
-echo "==> Creating upstream PR branch..."
-git checkout upstream/main
-git checkout -b upstream-pr/$FEATURE_NAME
-
-echo "==> Branch created: upstream-pr/$FEATURE_NAME"
-echo ""
-echo "Next steps:"
-echo "1. Cherry-pick your commits (without fork branding)"
-echo "2. Remove any fork-specific code"
-echo "3. Ensure tests pass"
-echo "4. Push: git push origin upstream-pr/$FEATURE_NAME"
-echo "5. Create PR to steipete/CodexBar from GitHub UI"
-```
-
-### Cleaning Commits for Upstream
-
-```bash
-# Start from upstream's main
-git checkout upstream/main
-git checkout -b upstream-pr/fix-cursor-bonus
-
-# Cherry-pick your fix (without fork branding)
-git cherry-pick <your-commit-hash>
-
-# If commit includes fork branding, amend it
-git commit --amend
-
-# Remove fork-specific changes
-git reset HEAD~1
-# Manually stage only upstream-suitable changes
-git add <files>
-git commit -m "fix: correct Cursor bonus credits calculation
-
-Fixes issue where bonus credits were incorrectly calculated.
-
-Tested with multiple account types."
-
-# Push to your fork
-git push origin upstream-pr/fix-cursor-bonus
-
-# Create PR to steipete/CodexBar via GitHub UI
-```
-
----
-
-## 🏷️ Commit Message Strategy
-
-### Fork Commits (Keep Everything)
-
-```
-feat: add multi-account management for Augment
-
-Implements account switching UI and storage.
-Fork-specific feature for topoffunnel.com users.
-
-Co-authored-by: Brandon Charleson <brandon@topoffunnel.com>
-```
-
-### Upstream-Bound Commits (Generic)
-
-```
-fix: correct Cursor bonus credits calculation
-
-The bonus credits were being added instead of subtracted
-from the total usage calculation.
-
-Tested with Pro and Team accounts.
-```
-
-### Quotio-Inspired Commits (Attribution)
-
-```
-feat: implement session persistence inspired by quotio
-
-Adds automatic session restoration on app restart.
-
-Inspired by quotio's approach:
-https://github.com/nguyenphutrong/quotio/blob/main/...
-
-Implemented independently using CodexBar patterns.
-```
-
----
-
-## 📋 Decision Matrix: What Goes Where?
-
-| Change Type | Fork | Upstream | Notes |
-|------------|------|----------|-------|
-| Bug fix (universal) | ✅ | ✅ | Submit to upstream |
-| Bug fix (fork-specific) | ✅ | ❌ | Keep in fork |
-| Performance improvement | ✅ | ✅ | Submit to upstream |
-| New provider support | ✅ | ✅ | Submit to upstream |
-| Provider enhancement | ✅ | Maybe | Depends on scope |
-| UI improvement (generic) | ✅ | ✅ | Submit to upstream |
-| UI improvement (fork brand) | ✅ | ❌ | Keep in fork |
-| Multi-account feature | ✅ | ❌ | Too large for upstream |
-| Documentation | ✅ | ✅ | Submit to upstream |
-| Tests | ✅ | ✅ | Submit to upstream |
-| Fork branding | ✅ | ❌ | Never upstream |
-| Experimental feature | ✅ | ❌ | Prove it first |
-
----
-
-## 🔐 Protecting Your Attribution
-
-### Separate Commits Strategy
-
-```bash
-# Make changes in feature branch
-git checkout -b feature/my-improvement
-
-# Commit 1: Core improvement (upstream-suitable)
-git add Sources/CodexBarCore/...
-git commit -m "feat: improve cookie handling"
-
-# Commit 2: Fork-specific enhancements
-git add Sources/CodexBar/About.swift
-git commit -m "feat: add fork attribution for improvement"
-
-# Merge to main (both commits)
-git checkout main
-git merge feature/my-improvement
-
-# For upstream PR: cherry-pick only commit 1
-git checkout upstream/main
-git checkout -b upstream-pr/cookie-handling
-git cherry-pick <commit-1-hash>  # Only the core improvement
-```
-
-### Maintaining Fork Identity
-
-Keep these files fork-specific (never upstream):
-- `Sources/CodexBar/About.swift` (your attribution)
-- `Sources/CodexBar/PreferencesAboutPane.swift` (fork sections)
-- `README.md` (fork notice)
-- `docs/FORK_*.md` (fork documentation)
-- `FORK_STATUS.md`
-
----
-
-## 🤖 Automation Scripts
-
-All automation scripts are located in `Scripts/`:
-
-- **check_upstreams.sh** - Check for new commits in both upstreams
-- **review_upstream.sh** - Create review branch for upstream changes
-- **prepare_upstream_pr.sh** - Prepare clean branch for upstream PR
-- **analyze_quotio.sh** - Analyze quotio for patterns and features
-
-GitHub Actions workflow: `.github/workflows/upstream-monitor.yml`
-
----
-
-## 📖 Practical Examples
-
-### Example 1: Weekly Upstream Check
-
-```bash
-# Monday morning routine
-./Scripts/check_upstreams.sh
-
-# If changes found, review them
-./Scripts/review_upstream.sh upstream
-
-# Cherry-pick valuable commits
-git cherry-pick abc123
-git cherry-pick def456
-
-# Test
-./Scripts/compile_and_run.sh
-
-# Merge to main
-git checkout main
-git merge upstream-sync/upstream-20260104
-```
-
-### Example 2: Contributing Bug Fix Upstream
-
-```bash
-# You fixed a bug in your fork
-git log --oneline -5
-# abc123 fix: correct Cursor bonus credits
-# def456 feat: add fork attribution
-
-# Prepare upstream PR (only the fix, not attribution)
-./Scripts/prepare_upstream_pr.sh fix-cursor-bonus
-
-# Cherry-pick only the fix
-git cherry-pick abc123
-
-# Review - ensure no fork branding
-git diff upstream/main
-
-# Push and create PR
-git push origin upstream-pr/fix-cursor-bonus
-# Then create PR on GitHub to steipete/CodexBar
-```
-
-### Example 3: Learning from Quotio
-
-```bash
-# Analyze quotio
-./Scripts/analyze_quotio.sh
-
-# Review their multi-account implementation
-git show quotio/main:path/to/AccountManager.swift
-
-# Document patterns in docs/QUOTIO_ANALYSIS.md
-# Then implement independently in your fork
-
-# Commit with attribution
-git commit -m "feat: implement multi-account management
-
-Inspired by quotio's account switching pattern:
-https://github.com/nguyenphutrong/quotio/...
-
-Implemented independently using CodexBar's architecture."
-```
-
----
-
-## 🎓 Best Practices
-
-### For Fork Development
-1. **Commit often** - Small, focused commits
-2. **Separate concerns** - Fork branding in separate commits
-3. **Test thoroughly** - Every change
-4. **Document decisions** - Why you chose this approach
-5. **Credit sources** - When inspired by others
-
-### For Upstream Contributions
-1. **Start small** - Bug fixes before features
-2. **One thing per PR** - Focused changes
-3. **Follow their style** - Match upstream conventions
-4. **Include tests** - Prove it works
-5. **Be patient** - Maintainers are busy
-
-### For Multi-Upstream Sync
-1. **Check weekly** - Stay current
-2. **Review carefully** - Understand before merging
-3. **Test everything** - Upstream changes may break your fork
-4. **Document conflicts** - How you resolved them
-5. **Keep attribution** - Credit all sources
-
----
-
-## 🔧 Troubleshooting
-
-### Merge Conflicts
-
-```bash
-# During upstream merge
-git merge upstream/main
-# CONFLICT in Sources/CodexBar/About.swift
-
-# Keep your fork version for branding files
-git checkout --ours Sources/CodexBar/About.swift
-git add Sources/CodexBar/About.swift
-
-# Merge other files manually
-# Then continue
-git commit
-```
-
-### Accidentally Pushed Fork Branding to Upstream PR
-
-```bash
-# Oops! Pushed fork branding to upstream PR branch
-git checkout upstream-pr/my-feature
-
-# Reset to before the bad commit
-git reset --hard HEAD~1
-
-# Re-apply changes without branding
-# ... make changes ...
-git commit -m "fix: proper commit"
-
-# Force push (only safe on PR branches)
-git push origin upstream-pr/my-feature --force
-```
-
-### Lost Track of Upstream Changes
-
-```bash
-# See what you've merged from upstream
-git log --oneline --graph --all --grep="upstream"
-
-# See what's still pending
-git log --oneline main..upstream/main
-
-# Create a tracking branch
-git checkout -b upstream-tracking upstream/main
-git log --oneline upstream-tracking..main
-```
-
----
-
-## 📊 Success Metrics
-
-### Fork Health
-- ✅ Builds without errors
-- ✅ All tests passing
-- ✅ No regressions from upstream merges
-- ✅ Fork-specific features working
-- ✅ Documentation up to date
-
-### Upstream Relationship
-- ✅ PRs are small and focused
-- ✅ PRs get merged (or constructive feedback)
-- ✅ Maintain good relationship with maintainer
-- ✅ Credit given appropriately
-- ✅ No fork branding in upstream PRs
-
-### Multi-Source Learning
-- ✅ Regular upstream monitoring
-- ✅ Quotio patterns documented
-- ✅ Independent implementations
-- ✅ Proper attribution
-- ✅ Best-of-both-worlds achieved
-
----
-
-## 🗓️ Recommended Schedule
-
-### Weekly
-- Monday: Check upstreams (`./Scripts/check_upstreams.sh`)
-- Thursday: Review quotio (`./Scripts/analyze_quotio.sh`)
-
-### Monthly
-- Review upstream PRs you submitted
-- Update QUOTIO_ANALYSIS.md with new findings
-- Sync with upstream main
-- Update fork documentation
-
-### Quarterly
-- Major feature planning
-- Upstream contribution strategy review
-- Fork roadmap update
-- Community engagement
-
----
-
-## 📞 Getting Help
-
-### Upstream Issues
-- Check their issue tracker first
-- Ask in discussions if available
-- Be respectful and patient
-- Provide minimal reproduction
-
-### Fork Issues
-- Document in your fork's issues
-- Reference upstream if relevant
-- Track in FORK_STATUS.md
-- Update roadmap as needed
-
-### Quotio Questions
-- Review their documentation
-- Check their issue tracker
-- Don't ask them to help with your fork
-- Credit them when you adapt patterns
-
----
-
-**Remember:** Your fork is independent. Upstream contributions are optional. Learn from others, but implement independently. Credit sources appropriately.
-
+If we adopt any upstream change, also note:
+- whether it was cherry-picked or reimplemented
+- which files were conflict-heavy
+- whether future sync risk increased or decreased

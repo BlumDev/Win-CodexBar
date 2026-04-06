@@ -35,6 +35,7 @@ impl Default for UpdateState {
 pub struct UpdateInfo {
     pub version: String,
     pub download_url: String,
+    pub expected_sha256: Option<String>,
     #[allow(dead_code)]
     pub release_url: String,
     #[allow(dead_code)]
@@ -58,6 +59,8 @@ struct GitHubRelease {
 struct GitHubAsset {
     name: String,
     browser_download_url: String,
+    #[serde(default)]
+    digest: Option<String>,
 }
 
 /// Check for updates from GitHub releases
@@ -124,20 +127,40 @@ pub async fn check_for_updates_with_channel(channel: UpdateChannel) -> Option<Up
     // Compare versions
     if is_newer_version(remote_version, CURRENT_VERSION) {
         // Find the installer or exe asset
-        let download_url = release
+        let asset = release
             .assets
             .iter()
             .find(|a| a.name.ends_with("-Setup.exe"))
-            .or_else(|| release.assets.iter().find(|a| a.name.ends_with(".exe")))
+            .or_else(|| release.assets.iter().find(|a| a.name.ends_with(".exe")));
+
+        let download_url = asset
             .map(|a| a.browser_download_url.clone())
             .unwrap_or_else(|| release.html_url.clone());
 
         Some(UpdateInfo {
             version: release.tag_name,
             download_url,
+            expected_sha256: asset
+                .and_then(|a| a.digest.as_deref())
+                .and_then(parse_sha256_digest)
+                .map(str::to_string),
             release_url: release.html_url,
             release_notes: release.body.unwrap_or_default(),
         })
+    } else {
+        None
+    }
+}
+
+fn parse_sha256_digest(digest: &str) -> Option<&str> {
+    let (algo, hex) = digest.split_once(':')?;
+    if !algo.eq_ignore_ascii_case("sha256") {
+        return None;
+    }
+
+    let hex = hex.trim();
+    if hex.len() == 64 && hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        Some(hex)
     } else {
         None
     }
@@ -252,8 +275,15 @@ pub async fn download_update(
         .await
         .map_err(|e| format!("Failed to flush file: {}", e))?;
 
-    // Verify download integrity using SHA256 checksum from release
-    verify_download_hash(&client, &update_info.download_url, &file_path).await?;
+    // Verify download integrity using SHA256 checksum from release metadata.
+    verify_download_hash(
+        &file_path,
+        update_info
+            .expected_sha256
+            .as_deref()
+            .ok_or_else(|| "Missing SHA256 digest for update asset".to_string())?,
+    )
+    .await?;
 
     // Signal download complete
     let _ = progress_tx.send(UpdateState::Ready(file_path.clone()));
@@ -261,49 +291,14 @@ pub async fn download_update(
     Ok(file_path)
 }
 
-/// Verify the SHA256 hash of a downloaded file against a .sha256 sidecar file
-async fn verify_download_hash(
-    client: &reqwest::Client,
-    download_url: &str,
-    file_path: &PathBuf,
-) -> Result<(), String> {
+/// Verify the SHA256 hash of a downloaded file against release metadata.
+async fn verify_download_hash(file_path: &PathBuf, expected_hash: &str) -> Result<(), String> {
+    let expected = expected_hash.trim().to_ascii_lowercase();
+    if expected.len() != 64 || !expected.chars().all(|c| c.is_ascii_hexdigit()) {
+        return Err("Invalid SHA256 digest provided for update asset".to_string());
+    }
+
     use sha2::{Digest, Sha256};
-
-    let hash_url = format!("{}.sha256", download_url);
-
-    let hash_resp = client
-        .get(&hash_url)
-        .send()
-        .await
-        .map_err(|e| format!("Failed to fetch checksum: {}", e))?;
-
-    if !hash_resp.status().is_success() {
-        tracing::warn!(
-            "No SHA256 checksum file found at {}. Skipping verification — consider publishing a .sha256 sidecar.",
-            hash_url
-        );
-        return Ok(());
-    }
-
-    let expected_hash = hash_resp
-        .text()
-        .await
-        .map_err(|e| format!("Failed to read checksum: {}", e))?;
-
-    // Parse hash (format: "hash  filename" or just "hash")
-    let expected = expected_hash
-        .split_whitespace()
-        .next()
-        .unwrap_or("")
-        .trim()
-        .to_lowercase();
-
-    if expected.len() != 64 {
-        return Err(format!(
-            "Invalid SHA256 hash length: {} chars",
-            expected.len()
-        ));
-    }
 
     let file_bytes = tokio::fs::read(file_path)
         .await
@@ -316,10 +311,7 @@ async fn verify_download_hash(
     if actual != expected {
         // Delete the corrupted file
         let _ = tokio::fs::remove_file(file_path).await;
-        return Err(format!(
-            "SHA256 mismatch: expected {}, got {}. Download may be corrupted or tampered.",
-            expected, actual
-        ));
+        return Err("SHA256 mismatch. Download may be corrupted or tampered.".to_string());
     }
 
     tracing::info!("SHA256 verification passed for {:?}", file_path);
@@ -434,5 +426,17 @@ mod tests {
         assert!(!is_newer_version("1.0.0", "1.0.0"));
         assert!(!is_newer_version("0.9.0", "1.0.0"));
         assert!(is_newer_version("1.0.0", "0.1.0"));
+    }
+
+    #[test]
+    fn test_parse_sha256_digest() {
+        let digest =
+            "sha256:aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa";
+        assert_eq!(
+            parse_sha256_digest(digest),
+            Some("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")
+        );
+        assert_eq!(parse_sha256_digest("md5:abc"), None);
+        assert_eq!(parse_sha256_digest("sha256:nothex"), None);
     }
 }

@@ -127,6 +127,11 @@ impl CommandRunner {
         which::which(binary).ok()
     }
 
+    fn is_explicit_binary_path(binary: &str) -> bool {
+        let path = std::path::Path::new(binary);
+        path.is_absolute() || path.components().count() > 1
+    }
+
     /// Run a command and capture output
     pub fn run(
         &self,
@@ -135,8 +140,13 @@ impl CommandRunner {
         options: &CommandOptions,
     ) -> Result<CommandResult, CommandError> {
         // Find the binary
-        let binary_path = if std::path::Path::new(binary).exists() {
-            PathBuf::from(binary)
+        let binary_path = if Self::is_explicit_binary_path(binary) {
+            let path = PathBuf::from(binary);
+            if path.exists() {
+                path
+            } else {
+                return Err(CommandError::BinaryNotFound(binary.to_string()));
+            }
         } else {
             Self::which(binary).ok_or_else(|| CommandError::BinaryNotFound(binary.to_string()))?
         };

@@ -265,6 +265,11 @@ impl TtyCommandRunner {
         Some(PathBuf::from(first_line))
     }
 
+    fn is_explicit_binary_path(binary: &str) -> bool {
+        let path = std::path::Path::new(binary);
+        path.is_absolute() || path.components().count() > 1
+    }
+
     /// Run a command and capture its output
     ///
     /// This is a simplified version for Windows that doesn't use PTY.
@@ -276,8 +281,13 @@ impl TtyCommandRunner {
         options: TtyCommandOptions,
     ) -> Result<TtyCommandResult, TtyCommandError> {
         // Resolve the binary path
-        let resolved = if std::path::Path::new(binary).exists() {
-            PathBuf::from(binary)
+        let resolved = if Self::is_explicit_binary_path(binary) {
+            let path = PathBuf::from(binary);
+            if path.exists() {
+                path
+            } else {
+                return Err(TtyCommandError::BinaryNotFound(binary.to_string()));
+            }
         } else if let Some(path) = Self::which(binary) {
             path
         } else {

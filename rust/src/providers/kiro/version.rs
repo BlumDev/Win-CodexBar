@@ -4,7 +4,7 @@
 
 #[cfg(windows)]
 use std::os::windows::process::CommandExt;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::OnceLock;
 
@@ -13,6 +13,43 @@ static CLI_PATH: OnceLock<Option<PathBuf>> = OnceLock::new();
 
 /// Cached CLI version
 static CLI_VERSION: OnceLock<Option<String>> = OnceLock::new();
+const KIRO_CLI_PATH_ENV: &str = "CODEXBAR_KIRO_CLI_PATH";
+
+fn is_allowed_kiro_binary(path: &Path) -> bool {
+    if !path.is_file() {
+        return false;
+    }
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+
+    #[cfg(target_os = "windows")]
+    {
+        file_name.eq_ignore_ascii_case("kiro-cli.exe")
+            || file_name.eq_ignore_ascii_case("kiro.exe")
+    }
+
+    #[cfg(not(target_os = "windows"))]
+    {
+        file_name == "kiro-cli" || file_name == "kiro"
+    }
+}
+
+fn env_override_cli_path() -> Option<PathBuf> {
+    let raw = std::env::var(KIRO_CLI_PATH_ENV).ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let path = PathBuf::from(trimmed);
+    if is_allowed_kiro_binary(&path) {
+        Some(path)
+    } else {
+        None
+    }
+}
 
 /// Kiro CLI version info
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,13 +188,19 @@ impl Ord for KiroVersion {
 pub fn find_kiro_cli() -> Option<PathBuf> {
     CLI_PATH
         .get_or_init(|| {
-            // Try kiro-cli first (the official CLI name)
-            if let Ok(path) = which::which("kiro-cli") {
+            if let Some(path) = env_override_cli_path() {
                 return Some(path);
             }
-            // Fall back to kiro
+
+            if let Ok(path) = which::which("kiro-cli") {
+                if is_allowed_kiro_binary(&path) {
+                    return Some(path);
+                }
+            }
             if let Ok(path) = which::which("kiro") {
-                return Some(path);
+                if is_allowed_kiro_binary(&path) {
+                    return Some(path);
+                }
             }
 
             #[cfg(target_os = "windows")]
@@ -165,10 +208,13 @@ pub fn find_kiro_cli() -> Option<PathBuf> {
                 let possible_paths = [
                     dirs::data_local_dir()
                         .map(|p| p.join("Programs").join("Kiro").join("kiro-cli.exe")),
+                    dirs::data_local_dir()
+                        .map(|p| p.join("Programs").join("Kiro").join("kiro.exe")),
                     Some(PathBuf::from("C:\\Program Files\\Kiro\\kiro-cli.exe")),
+                    Some(PathBuf::from("C:\\Program Files\\Kiro\\kiro.exe")),
                 ];
                 for path in possible_paths.into_iter().flatten() {
-                    if path.exists() {
+                    if is_allowed_kiro_binary(&path) {
                         return Some(path);
                     }
                 }
