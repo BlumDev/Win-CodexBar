@@ -55,10 +55,7 @@ impl Provider for CursorProvider {
         &self.metadata
     }
 
-    async fn fetch_usage(
-        &self,
-        ctx: &FetchContext,
-    ) -> Result<ProviderFetchResult, ProviderError> {
+    async fn fetch_usage(&self, ctx: &FetchContext) -> Result<ProviderFetchResult, ProviderError> {
         tracing::debug!("Fetching Cursor usage via web API");
 
         let fetch = if let Some(ref cookie_header) = ctx.manual_cookie_header {

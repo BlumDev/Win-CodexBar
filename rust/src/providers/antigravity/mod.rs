@@ -454,10 +454,7 @@ fn parse_reset_time(value: &str) -> Option<DateTime<Utc>> {
 fn rate_window_from_quota(quota: &QuotaInfo) -> RateWindow {
     let remaining = quota.remaining_fraction.unwrap_or(1.0);
     let used_percent = (1.0 - remaining) * 100.0;
-    let resets_at = quota
-        .reset_time
-        .as_deref()
-        .and_then(parse_reset_time);
+    let resets_at = quota.reset_time.as_deref().and_then(parse_reset_time);
     RateWindow::with_details(used_percent, None, resets_at, quota.reset_time.clone())
 }
 

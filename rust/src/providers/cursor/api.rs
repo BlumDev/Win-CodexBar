@@ -145,64 +145,51 @@ impl CursorApi {
             .as_ref()
             .and_then(|s| parse_iso_date(s));
 
-        let (percent_used, secondary, model_specific, cost_snapshot) =
-            if let Some(individual) = &summary.individual_usage {
-                if let Some(plan) = &individual.plan {
-                    let used_cents = plan.used.unwrap_or(0) as f64;
-                    let limit_cents = plan
-                        .breakdown
-                        .as_ref()
-                        .and_then(|b| b.total)
-                        .or(plan.limit)
-                        .unwrap_or(0) as f64;
+        let (percent_used, secondary, model_specific, cost_snapshot) = if let Some(individual) =
+            &summary.individual_usage
+        {
+            if let Some(plan) = &individual.plan {
+                let used_cents = plan.used.unwrap_or(0) as f64;
+                let limit_cents = plan
+                    .breakdown
+                    .as_ref()
+                    .and_then(|b| b.total)
+                    .or(plan.limit)
+                    .unwrap_or(0) as f64;
 
-                    let percent = if let Some(total_percent) = plan.total_percent_used {
-                        normalize_cursor_percent(total_percent)
-                    } else if summary.is_unlimited == Some(true) {
-                        0.0
-                    } else if limit_cents > 0.0 {
-                        (used_cents / limit_cents) * 100.0
-                    } else {
-                        0.0
-                    };
-
-                    let secondary = plan
-                        .auto_percent_used
-                        .map(|v| {
-                            RateWindow::with_details(
-                                normalize_cursor_percent(v),
-                                None,
-                                billing_end,
-                                None,
-                            )
-                        });
-
-                    let model_specific = plan
-                        .api_percent_used
-                        .map(|v| {
-                            RateWindow::with_details(
-                                normalize_cursor_percent(v),
-                                None,
-                                billing_end,
-                                None,
-                            )
-                        });
-
-                    let mut cost = CostSnapshot::new(used_cents / 100.0, "USD", "Monthly");
-                    if limit_cents > 0.0 {
-                        cost = cost.with_limit(limit_cents / 100.0);
-                    }
-                    if let Some(reset) = billing_end {
-                        cost = cost.with_resets_at(reset);
-                    }
-
-                    (percent, secondary, model_specific, Some(cost))
+                let percent = if let Some(total_percent) = plan.total_percent_used {
+                    normalize_cursor_percent(total_percent)
+                } else if summary.is_unlimited == Some(true) {
+                    0.0
+                } else if limit_cents > 0.0 {
+                    (used_cents / limit_cents) * 100.0
                 } else {
-                    (0.0, None, None, None)
+                    0.0
+                };
+
+                let secondary = plan.auto_percent_used.map(|v| {
+                    RateWindow::with_details(normalize_cursor_percent(v), None, billing_end, None)
+                });
+
+                let model_specific = plan.api_percent_used.map(|v| {
+                    RateWindow::with_details(normalize_cursor_percent(v), None, billing_end, None)
+                });
+
+                let mut cost = CostSnapshot::new(used_cents / 100.0, "USD", "Monthly");
+                if limit_cents > 0.0 {
+                    cost = cost.with_limit(limit_cents / 100.0);
                 }
+                if let Some(reset) = billing_end {
+                    cost = cost.with_resets_at(reset);
+                }
+
+                (percent, secondary, model_specific, Some(cost))
             } else {
                 (0.0, None, None, None)
-            };
+            }
+        } else {
+            (0.0, None, None, None)
+        };
 
         let primary = RateWindow::with_details(percent_used, None, billing_end, None);
 

@@ -10,7 +10,10 @@ fn main() {
         let mut res = winresource::WindowsResource::new();
         res.set_icon("icons/icon.ico");
         if let Err(err) = res.compile() {
-            println!("cargo:warning=Failed to embed Windows icon resource: {}", err);
+            println!(
+                "cargo:warning=Failed to embed Windows icon resource: {}",
+                err
+            );
         }
     }
 

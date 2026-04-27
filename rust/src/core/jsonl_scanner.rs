@@ -62,6 +62,24 @@ pub struct CodexParseResult {
     pub last_totals: Option<CodexTotals>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexTokenSnapshot {
+    pub input_tokens: i64,
+    pub cached_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+    pub last_model: Option<String>,
+    pub by_model: HashMap<String, CodexTokenModelTotals>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
+pub struct CodexTokenModelTotals {
+    pub input_tokens: i64,
+    pub cached_tokens: i64,
+    pub output_tokens: i64,
+    pub total_tokens: i64,
+}
+
 /// Day range for scanning
 pub struct CostUsageDayRange {
     pub since_key: String,
@@ -359,6 +377,68 @@ impl JsonlScanner {
             last_model: current_model,
             last_totals: previous_totals,
         })
+    }
+
+    pub fn codex_token_snapshot(days: u32) -> Option<CodexTokenSnapshot> {
+        let root = Self::default_codex_sessions_root()?;
+        if !root.exists() {
+            return None;
+        }
+
+        let today = Utc::now().date_naive();
+        let since = today - chrono::Duration::days(days.saturating_sub(1) as i64);
+        let range = CostUsageDayRange::new(since, today);
+        let mut files = Self::list_codex_session_files(
+            &root,
+            &range.scan_since_key,
+            &range.scan_until_key,
+        );
+        files.sort();
+
+        let mut snapshot = CodexTokenSnapshot::default();
+        let mut current_model: Option<String> = None;
+        let mut previous_totals: Option<CodexTotals> = None;
+
+        for file in files {
+            if let Ok(parsed) =
+                Self::parse_codex_file(
+                    &file,
+                    &range,
+                    0,
+                    current_model.clone(),
+                    previous_totals.clone(),
+                )
+            {
+                for model_totals in parsed.days.values() {
+                    for (model, totals) in model_totals {
+                        if totals.len() < 3 {
+                            continue;
+                        }
+                        let input = totals[0] as i64;
+                        let cached = totals[1] as i64;
+                        let output = totals[2] as i64;
+                        let total = input + output;
+
+                        snapshot.input_tokens += input;
+                        snapshot.cached_tokens += cached;
+                        snapshot.output_tokens += output;
+                        snapshot.total_tokens += total;
+
+                        let entry = snapshot.by_model.entry(model.clone()).or_default();
+                        entry.input_tokens += input;
+                        entry.cached_tokens += cached;
+                        entry.output_tokens += output;
+                        entry.total_tokens += total;
+                    }
+                }
+
+                current_model = parsed.last_model;
+                previous_totals = parsed.last_totals;
+            }
+        }
+
+        snapshot.last_model = current_model;
+        Some(snapshot)
     }
 
     /// Load cache from disk

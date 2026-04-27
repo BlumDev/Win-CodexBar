@@ -48,6 +48,9 @@ tmpclaude-*
 dist/
 nul
 
+# Local persistent usage data
+data/
+
 # Local scripts and env files
 *.ps1
 !dev.ps1

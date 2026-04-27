@@ -10,12 +10,12 @@ use std::cell::RefCell;
 use std::sync::{Arc, Mutex};
 
 use super::provider_icons::ProviderIconCache;
-use super::theme::{provider_color, provider_icon, FontSize, Radius, Spacing, Theme};
+use super::theme::{FontSize, Radius, Spacing, Theme, provider_color, provider_icon};
 use crate::browser::cookies::get_cookie_header_from_browser;
 use crate::browser::detection::{BrowserDetector, BrowserType};
 use crate::core::{PersonalInfoRedactor, ProviderId, WidgetSnapshot, WidgetSnapshotStore};
 use crate::core::{ProviderAccountData, TokenAccount, TokenAccountStore, TokenAccountSupport};
-use crate::settings::{get_api_key_providers, ApiKeys, ManualCookies, Settings, TrayIconMode};
+use crate::settings::{ApiKeys, ManualCookies, Settings, TrayIconMode, get_api_key_providers};
 use crate::shortcuts::format_shortcut;
 use std::collections::HashMap;
 
@@ -1147,8 +1147,12 @@ impl PreferencesWindow {
                                 }
                                 Ok(_) => {
                                     self.browser_import_status = Some((
-                                        format!("No cookies found for {} in {}. Make sure you're logged in.", domain, browser_type.display_name()),
-                                        true
+                                        format!(
+                                            "No cookies found for {} in {}. Make sure you're logged in.",
+                                            domain,
+                                            browser_type.display_name()
+                                        ),
+                                        true,
                                     ));
                                 }
                                 Err(e) => {
@@ -2018,7 +2022,7 @@ fn work_area_rect(ctx: &egui::Context) -> Option<Rect> {
     {
         use windows::Win32::Foundation::RECT as WinRect;
         use windows::Win32::UI::WindowsAndMessaging::{
-            SystemParametersInfoW, SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS,
+            SPI_GETWORKAREA, SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SystemParametersInfoW,
         };
 
         let mut rect = WinRect::default();

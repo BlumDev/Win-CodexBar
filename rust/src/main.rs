@@ -25,10 +25,11 @@ mod sound;
 mod status;
 mod tray;
 mod updater;
+mod usage_log;
 mod wsl;
 
 use clap::Parser;
-use cli::{exit_codes, Cli, Commands};
+use cli::{Cli, Commands, exit_codes};
 
 /// Redact sensitive CLI arguments (tokens, keys, cookies) from log output
 fn redact_sensitive_args(args: &[String]) -> Vec<String> {
@@ -236,7 +237,7 @@ fn categorize_error(e: &anyhow::Error) -> i32 {
 #[cfg(windows)]
 fn hide_console_window() {
     use windows::Win32::System::Console::GetConsoleWindow;
-    use windows::Win32::UI::WindowsAndMessaging::{ShowWindow, SW_HIDE};
+    use windows::Win32::UI::WindowsAndMessaging::{SW_HIDE, ShowWindow};
 
     unsafe {
         let console = GetConsoleWindow();
