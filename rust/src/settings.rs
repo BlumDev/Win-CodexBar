@@ -439,6 +439,10 @@ pub fn get_refresh_interval_options() -> Vec<RefreshIntervalOption> {
             label: "2 minutes".to_string(),
         },
         RefreshIntervalOption {
+            value: 180,
+            label: "3 minutes".to_string(),
+        },
+        RefreshIntervalOption {
             value: 300,
             label: "5 minutes".to_string(),
         },
@@ -826,7 +830,10 @@ mod tests {
         let options = get_refresh_interval_options();
         assert!(!options.is_empty());
         assert!(options.iter().any(|o| o.value == 60));
+        assert!(options.iter().any(|o| o.value == 120));
+        assert!(options.iter().any(|o| o.value == 180));
         assert!(options.iter().any(|o| o.value == 300));
+        assert!(options.iter().any(|o| o.value == 600));
     }
 
     #[test]

@@ -53,3 +53,89 @@
 - Cookie import UX uses explicit browser selection in Preferences. Do not assume Chrome-only in general UI flows.
 - Be conservative with secret handling (manual cookies, API keys, token accounts); use existing redaction/storage helpers.
 - Prefer Windows-native validation for tray/DPAPI/browser-cookie behavior; WSL/Linux can be insufficient for those paths.
+
+## Persistence & Runtime Paths
+
+| What | Path |
+|------|------|
+| Settings | `%APPDATA%\CodexBar\settings.json` |
+| Claude OAuth credentials | `~\.claude\.credentials.json` → key `claudeAiOauth` |
+| Usage logs / history | `data/` in repo root |
+| Active binary | `rust/target/x86_64-pc-windows-gnu/release/codexbar.exe` |
+
+The `codexbar.exe` in the repo root is a pre-built snapshot (March 2024) — **not** the active binary.
+
+## Build & Deploy
+
+```powershell
+# Always stop the app first — the release binary is file-locked while running
+Get-Process codexbar -ErrorAction SilentlyContinue | Stop-Process -Force
+
+cd rust
+cargo build           # debug (~3 min)
+cargo build --release # release (~4 min)
+```
+
+Launch: run the binary directly from Explorer or Autostart — **not** via `Start-Process` from a tool session, otherwise the tray icon won't close cleanly.
+
+## Key Structs
+
+| Struct | Purpose |
+|--------|---------|
+| `ProviderData` | Per-provider UI state (`session_percent`, `weekly_percent`, `session_reset`, …) |
+| `UsageSnapshot` | Raw fetch output; holds primary / secondary / model_specific `RateWindow` |
+| `RateWindow` | `used_percent`, `window_minutes`, `resets_at (DateTime<Utc>)`, `reset_description` |
+| `FetchContext` | Input to `Provider::fetch_usage` (`source_mode`, cookies, api_key) |
+| `ProviderFetchResult` | Output: `UsageSnapshot` + `source_label` + optional `CostSnapshot` |
+
+## Claude Provider
+
+**Files:** `rust/src/providers/claude/`
+
+**Source fallback chain (Auto mode):** OAuth → Web (browser cookies) → CLI
+
+### OAuth endpoint (correct)
+```
+GET https://api.anthropic.com/api/oauth/usage
+Authorization: Bearer <accessToken from ~/.claude/.credentials.json>
+```
+Response is **snake_case** with `utilization` already a percentage (0–100):
+```json
+{ "five_hour": {"utilization": 28.0, "resets_at": "…"}, "seven_day": {…} }
+```
+`api.claude.ai` does **not** resolve via DNS — always use `api.anthropic.com`.
+
+### Token refresh (`oauth.rs`)
+The provider is **OAuth-only** in this build (`supports_web`/`supports_cli` are `false`,
+`SourceMode::Web`/`Cli` return `UnsupportedSource`), so there is no fallback — the OAuth
+token must stay valid. `fetch()` auto-refreshes:
+- If the access token is expired (or the API returns 401) and a `refreshToken` exists,
+  it POSTs to the token endpoint, persists the rotated tokens, and retries.
+- Token endpoint: `POST https://console.anthropic.com/v1/oauth/token`
+- Client id (public, same as `claude` CLI): `9d1c250a-e61b-44d9-88ed-5944d1962f5e`
+- Body: `{ grant_type: "refresh_token", refresh_token, client_id }`
+- Response: `{ access_token, refresh_token (rotated!), expires_in }`
+- **Refresh tokens rotate** — the new one must be written back or the next refresh fails.
+- Write-back is surgical (only `accessToken`/`refreshToken`/`expiresAt` in the
+  `claudeAiOauth` object) and atomic (temp file + rename), preserving `subscriptionType`,
+  `mcpOAuth`, etc. and avoiding corruption if the `claude` CLI reads concurrently.
+
+### Known fixes already applied
+- `oauth.rs`: wrong host (`api.claude.ai`) → `api.anthropic.com/api/oauth/usage`
+- `oauth.rs`: structs were camelCase (`fiveHour`, `resetsAt`) → corrected to snake_case
+- `oauth.rs`: added automatic OAuth token refresh (was read-only → errored on expiry)
+- `app.rs` (`refresh_providers`): provider list was replaced with 0%-placeholders on every refresh → now only rebuilt when the enabled-provider set changes; individual slots update in-place
+
+## Refresh Logic (`native_ui/app.rs :: refresh_providers`)
+
+- Spawns a thread → Tokio runtime → all providers fetched in parallel (`tokio::spawn`)
+- Each completed task writes directly into `s.providers[idx]` (in-place, no flash)
+- Default interval: 300 s; configurable in Settings
+- Reset times shown relative by default (`reset_time_relative: true`): format `3h 9m` / `5d 21h`
+
+## Git Remotes
+
+```
+origin    https://github.com/BlumDev/Win-CodexBar.git   ← your fork
+upstream  https://github.com/Finesssee/Win-CodexBar.git ← upstream
+```

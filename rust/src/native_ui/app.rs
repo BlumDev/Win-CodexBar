@@ -83,11 +83,13 @@ pub struct ProviderData {
     pub display_name: String,
     pub account: Option<String>, // Account email for display
     pub source_label: Option<String>,
+    pub is_loading: bool,
     pub session_percent: Option<f64>,
     pub session_reset: Option<String>,
     pub weekly_percent: Option<f64>,
     pub weekly_reset: Option<String>,
     pub model_percent: Option<f64>,
+    pub model_reset: Option<String>,
     pub model_name: Option<String>,
     pub plan: Option<String>,
     pub error: Option<String>,
@@ -98,6 +100,8 @@ pub struct ProviderData {
     pub session_pace_lasts_to_reset: bool,
     pub weekly_pace_percent: Option<f64>,
     pub weekly_pace_lasts_to_reset: bool,
+    pub model_pace_percent: Option<f64>,
+    pub model_pace_lasts_to_reset: bool,
     pub cost_used: Option<String>,
     pub credits_remaining: Option<f64>,
     pub credits_percent: Option<f64>,
@@ -130,11 +134,13 @@ impl ProviderData {
             display_name: id.display_name().to_string(),
             account: None,
             source_label: None,
+            is_loading: true,
             session_percent: None,
             session_reset: None,
             weekly_percent: None,
             weekly_reset: None,
             model_percent: None,
+            model_reset: None,
             model_name: None,
             plan: None,
             error: None,
@@ -145,6 +151,8 @@ impl ProviderData {
             session_pace_lasts_to_reset: false,
             weekly_pace_percent: None,
             weekly_pace_lasts_to_reset: false,
+            model_pace_percent: None,
+            model_pace_lasts_to_reset: false,
             cost_used: None,
             credits_remaining: None,
             credits_percent: None,
@@ -172,6 +180,11 @@ impl ProviderData {
             .as_ref()
             .map(calculate_pace)
             .unwrap_or((None, false));
+        let (model_pace_percent, model_pace_lasts) = snapshot
+            .model_specific
+            .as_ref()
+            .map(calculate_pace)
+            .unwrap_or((None, false));
 
         let (cost_used, credits_remaining, credits_percent) = if let Some(ref cost) = result.cost {
             if cost.period == "Credits" {
@@ -196,6 +209,7 @@ impl ProviderData {
             display_name: id.display_name().to_string(),
             account: snapshot.account_email.clone(), // Account email if available
             source_label: Some(result.source_label.clone()),
+            is_loading: false,
             session_percent: Some(snapshot.primary.used_percent),
             session_reset: snapshot
                 .primary
@@ -207,6 +221,10 @@ impl ProviderData {
                     .map(|t| format_reset_time(t, reset_time_relative))
             }),
             model_percent: snapshot.model_specific.as_ref().map(|m| m.used_percent),
+            model_reset: snapshot.model_specific.as_ref().and_then(|m| {
+                m.resets_at
+                    .map(|t| format_reset_time(t, reset_time_relative))
+            }),
             model_name: if id == ProviderId::Gemini && snapshot.model_specific.is_some() {
                 Some("Other Models".to_string())
             } else {
@@ -224,6 +242,8 @@ impl ProviderData {
             session_pace_lasts_to_reset: session_pace_lasts,
             weekly_pace_percent,
             weekly_pace_lasts_to_reset: weekly_pace_lasts,
+            model_pace_percent,
+            model_pace_lasts_to_reset: model_pace_lasts,
             cost_used,
             credits_remaining,
             credits_percent,
@@ -244,11 +264,13 @@ impl ProviderData {
             display_name: id.display_name().to_string(),
             account: None,
             source_label: None,
+            is_loading: false,
             session_percent: None,
             session_reset: None,
             weekly_percent: None,
             weekly_reset: None,
             model_percent: None,
+            model_reset: None,
             model_name: None,
             plan: None,
             error: Some(error),
@@ -259,6 +281,8 @@ impl ProviderData {
             session_pace_lasts_to_reset: false,
             weekly_pace_percent: None,
             weekly_pace_lasts_to_reset: false,
+            model_pace_percent: None,
+            model_pace_lasts_to_reset: false,
             cost_used: None,
             credits_remaining: None,
             credits_percent: None,
@@ -448,7 +472,39 @@ fn pace_status(
     pace_percent: Option<f64>,
     pace_lasts_to_reset: bool,
 ) -> Option<(&'static str, Color32)> {
+    pace_status_with_mode(display_percent, pace_percent, pace_lasts_to_reset)
+}
+
+fn cursor_metric_color(
+    display_percent: f64,
+    _pace_percent: Option<f64>,
+    _pace_lasts_to_reset: bool,
+) -> Color32 {
+    metric_severity_color(display_percent)
+}
+
+fn cursor_reset_time_color(used_percent: f64, pace_percent: Option<f64>) -> Option<Color32> {
+    let pace = pace_percent?;
+    let elapsed_percent = (used_percent - pace).clamp(0.0, 100.0);
+    let remaining_percent = 100.0 - elapsed_percent;
+    Some(if remaining_percent <= 5.0 {
+        Theme::RED
+    } else if remaining_percent <= 12.0 {
+        Theme::ORANGE
+    } else if remaining_percent <= 25.0 {
+        Theme::YELLOW
+    } else {
+        Theme::GREEN
+    })
+}
+
+fn pace_status_with_mode(
+    display_percent: f64,
+    pace_percent: Option<f64>,
+    pace_lasts_to_reset: bool,
+) -> Option<(&'static str, Color32)> {
     let delta = pace_percent?;
+
     if pace_lasts_to_reset {
         return Some(("OK", Theme::GREEN));
     }
@@ -961,10 +1017,25 @@ impl CodexBarApp {
                 s.is_refreshing = true;
                 s.loading_pattern = LoadingPattern::random();
                 s.loading_phase = 0.0;
-                s.providers = enabled_ids
-                    .iter()
-                    .map(|&id| ProviderData::placeholder(id))
-                    .collect();
+                // Only rebuild the provider list when the enabled set actually
+                // changed (first load, or a provider toggled on/off). Otherwise
+                // keep the existing entries so the dashboard updates in place
+                // instead of flashing placeholders (0% / blank) on every refresh.
+                let same_set = s.providers.len() == enabled_ids.len()
+                    && s.providers
+                        .iter()
+                        .zip(enabled_ids.iter())
+                        .all(|(existing, &id)| existing.name == id.cli_name());
+                if !same_set {
+                    s.providers = enabled_ids
+                        .iter()
+                        .map(|&id| ProviderData::placeholder(id))
+                        .collect();
+                } else {
+                    for provider in &mut s.providers {
+                        provider.is_loading = true;
+                    }
+                }
                 if s.selected_provider_idx >= s.providers.len() {
                     s.selected_provider_idx = 0;
                 }
@@ -976,6 +1047,9 @@ impl CodexBarApp {
                     tracing::error!("Failed to create tokio runtime: {}", e);
                     if let Ok(mut s) = state.lock() {
                         s.is_refreshing = false;
+                        for provider in &mut s.providers {
+                            provider.is_loading = false;
+                        }
                     }
                     return;
                 }
@@ -1085,6 +1159,8 @@ impl CodexBarApp {
                                 Err(_) => ProviderData::from_error(id, "Timeout".to_string()),
                             };
 
+                            result.is_loading = false;
+
                             if let Ok(Some(status)) = status_result {
                                 result.status_level = status.level;
                                 result.status_description = Some(status.description);
@@ -1162,6 +1238,9 @@ impl CodexBarApp {
             if let Ok(mut s) = state.lock() {
                 s.last_refresh = Instant::now();
                 s.is_refreshing = false;
+                for provider in &mut s.providers {
+                    provider.is_loading = false;
+                }
             }
         });
     }
@@ -1823,7 +1902,7 @@ impl eframe::App for CodexBarApp {
                     if !providers.is_empty() {
                         let visible_providers: Vec<(usize, &ProviderData)> = providers.iter()
                             .enumerate()
-                            .filter(|(_, p)| p.session_percent.is_some() || p.error.is_some())
+                            .filter(|(_, p)| p.session_percent.is_some() || p.error.is_some() || p.is_loading)
                             .collect();
 
                         if !visible_providers.is_empty() {
@@ -2076,7 +2155,9 @@ fn draw_overview_provider_row(
                     }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if let Some(error) = &provider.error {
+                        if provider.is_loading {
+                            ui.spinner();
+                        } else if let Some(error) = &provider.error {
                             let short = if error.len() > 30 {
                                 format!("{}…", &error[..29])
                             } else {
@@ -2158,9 +2239,64 @@ fn draw_provider_dashboard_bar(
     ui: &mut egui::Ui,
     provider: &ProviderData,
     show_as_used: bool,
-    brand_color: Color32,
+    _brand_color: Color32,
 ) {
     match provider.name.as_str() {
+        "claude" => {
+            let bar_width = ui.available_width();
+            let bar_height = 5.0;
+            let bar_gap = 3.0;
+            let total_height = (bar_height * 2.0) + bar_gap;
+            let (stack_rect, _) =
+                ui.allocate_exact_size(Vec2::new(bar_width, total_height), egui::Sense::hover());
+            let session_rect =
+                Rect::from_min_size(stack_rect.min, Vec2::new(bar_width, bar_height));
+            let weekly_rect = Rect::from_min_size(
+                egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
+                Vec2::new(bar_width, bar_height),
+            );
+
+            for rect in [session_rect, weekly_rect] {
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::same(bar_height / 2.0),
+                    Theme::progress_track(),
+                );
+            }
+
+            if let Some(session_percent) = provider.session_percent {
+                let display_percent = usage_display_percent(session_percent, show_as_used);
+                fill_bar(
+                    ui,
+                    session_rect,
+                    display_percent,
+                    metric_severity_color(display_percent),
+                );
+                draw_pace_marker(
+                    ui,
+                    session_rect,
+                    display_percent,
+                    provider.session_pace_percent,
+                    show_as_used,
+                );
+            }
+            if let Some(weekly_percent) = provider.weekly_percent {
+                let display_percent = usage_display_percent(weekly_percent, show_as_used);
+                fill_bar(
+                    ui,
+                    weekly_rect,
+                    display_percent,
+                    tinted(metric_severity_color(display_percent), 210),
+                );
+                draw_pace_marker(
+                    ui,
+                    weekly_rect,
+                    display_percent,
+                    provider.weekly_pace_percent,
+                    show_as_used,
+                );
+            }
+        }
         "codex" => {
             let bar_width = ui.available_width();
             let bar_height = 5.0;
@@ -2251,7 +2387,18 @@ fn draw_provider_dashboard_bar(
                     ui,
                     auto_rect,
                     display_percent,
-                    metric_severity_color(display_percent),
+                    cursor_metric_color(
+                        display_percent,
+                        provider.weekly_pace_percent,
+                        provider.weekly_pace_lasts_to_reset,
+                    ),
+                );
+                draw_pace_marker(
+                    ui,
+                    auto_rect,
+                    display_percent,
+                    provider.weekly_pace_percent,
+                    show_as_used,
                 );
             }
             if let Some(api_percent) = provider.model_percent {
@@ -2260,7 +2407,21 @@ fn draw_provider_dashboard_bar(
                     ui,
                     api_rect,
                     display_percent,
-                    tinted(metric_severity_color(display_percent), 190),
+                    tinted(
+                        cursor_metric_color(
+                            display_percent,
+                            provider.model_pace_percent,
+                            provider.model_pace_lasts_to_reset,
+                        ),
+                        210,
+                    ),
+                );
+                draw_pace_marker(
+                    ui,
+                    api_rect,
+                    display_percent,
+                    provider.model_pace_percent,
+                    show_as_used,
                 );
             }
         }
@@ -2385,6 +2546,58 @@ fn draw_pace_marker(
 
 fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, show_as_used: bool) {
     match provider.name.as_str() {
+        "claude" => {
+            let primary_label = provider.source_label.as_deref().unwrap_or("Primary");
+            let session_display = provider
+                .session_percent
+                .map(|percent| usage_display_percent(percent, show_as_used));
+            let session_reset_color = session_display.and_then(|display_percent| {
+                pace_status(
+                    display_percent,
+                    provider.session_pace_percent,
+                    provider.session_pace_lasts_to_reset,
+                )
+                .map(|(_, color)| color)
+            });
+            draw_dashboard_stat_with_detail_color(
+                ui,
+                &primary_label.to_uppercase(),
+                provider
+                    .session_percent
+                    .map(|percent| {
+                        usage_display_label(
+                            usage_display_percent(percent, show_as_used),
+                            show_as_used,
+                        )
+                    })
+                    .unwrap_or_else(|| "No data".to_string()),
+                provider.session_reset.as_deref(),
+                provider
+                    .session_percent
+                    .map(|percent| {
+                        metric_severity_color(usage_display_percent(percent, show_as_used))
+                    })
+                    .unwrap_or(Theme::TEXT_PRIMARY),
+                session_reset_color,
+            );
+            if let Some(weekly_percent) = provider.weekly_percent {
+                let weekly_display = usage_display_percent(weekly_percent, show_as_used);
+                let weekly_reset_color = pace_status(
+                    weekly_display,
+                    provider.weekly_pace_percent,
+                    provider.weekly_pace_lasts_to_reset,
+                )
+                .map(|(_, color)| color);
+                draw_dashboard_stat_with_detail_color(
+                    ui,
+                    "Woche",
+                    usage_display_label(weekly_display, show_as_used),
+                    provider.weekly_reset.as_deref(),
+                    metric_severity_color(weekly_display),
+                    weekly_reset_color,
+                );
+            }
+        }
         "codex" => {
             let session_display = provider
                 .session_percent
@@ -2429,10 +2642,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                 draw_dashboard_stat_with_detail_color(
                     ui,
                     "Week",
-                    usage_display_label(
-                        weekly_display,
-                        show_as_used,
-                    ),
+                    usage_display_label(weekly_display, show_as_used),
                     provider.weekly_reset.as_deref(),
                     metric_severity_color(weekly_display),
                     weekly_reset_color,
@@ -2441,30 +2651,43 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
         }
         "cursor" => {
             if let Some(auto_percent) = provider.weekly_percent {
-                draw_dashboard_stat(
+                let auto_display = usage_display_percent(auto_percent, show_as_used);
+                let auto_reset_color =
+                    cursor_reset_time_color(auto_percent, provider.weekly_pace_percent);
+                draw_dashboard_stat_with_detail_color(
                     ui,
                     "Auto+Composer",
-                    usage_display_label(
-                        usage_display_percent(auto_percent, show_as_used),
-                        show_as_used,
+                    usage_display_label(auto_display, show_as_used),
+                    provider.weekly_reset.as_deref(),
+                    cursor_metric_color(
+                        auto_display,
+                        provider.weekly_pace_percent,
+                        provider.weekly_pace_lasts_to_reset,
                     ),
-                    None,
-                    metric_severity_color(usage_display_percent(auto_percent, show_as_used)),
+                    auto_reset_color,
                 );
             }
             if let Some(api_percent) = provider.model_percent {
-                draw_dashboard_stat(
+                let api_display = usage_display_percent(api_percent, show_as_used);
+                let api_reset_color =
+                    cursor_reset_time_color(api_percent, provider.model_pace_percent);
+                draw_dashboard_stat_with_detail_color(
                     ui,
                     "API",
-                    usage_display_label(
-                        usage_display_percent(api_percent, show_as_used),
-                        show_as_used,
+                    usage_display_label(api_display, show_as_used),
+                    provider.model_reset.as_deref(),
+                    cursor_metric_color(
+                        api_display,
+                        provider.model_pace_percent,
+                        provider.model_pace_lasts_to_reset,
                     ),
-                    None,
-                    metric_severity_color(usage_display_percent(api_percent, show_as_used)),
+                    api_reset_color,
                 );
             }
-            draw_dashboard_stat(
+            let total_reset_color = provider.session_percent.and_then(|percent| {
+                cursor_reset_time_color(percent, provider.session_pace_percent)
+            });
+            draw_dashboard_stat_with_detail_color(
                 ui,
                 "Total",
                 provider
@@ -2480,9 +2703,15 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                 provider
                     .session_percent
                     .map(|percent| {
-                        metric_severity_color(usage_display_percent(percent, show_as_used))
+                        let display_percent = usage_display_percent(percent, show_as_used);
+                        cursor_metric_color(
+                            display_percent,
+                            provider.session_pace_percent,
+                            provider.session_pace_lasts_to_reset,
+                        )
                     })
                     .unwrap_or(Theme::TEXT_PRIMARY),
+                total_reset_color,
             );
         }
         "gemini" => {
@@ -2673,6 +2902,10 @@ fn draw_provider_detail_card(
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         ui.add_space(16.0); // Right padding
+                        if provider.is_loading {
+                            ui.spinner();
+                            ui.add_space(6.0);
+                        }
                         // Email - .subheadline, secondary color (redacted if privacy mode enabled)
                         if let Some(account) = &provider.account {
                             let display_account = PersonalInfoRedactor::redact_email(
@@ -2762,6 +2995,44 @@ fn draw_provider_detail_card(
             ui.add_space(10.0);
 
             match provider.name.as_str() {
+                "claude" => {
+                    if let Some(session_pct) = provider.session_percent {
+                        let display_percent = usage_display_percent(session_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            &format!(
+                                "{}-Sitzung",
+                                provider
+                                    .source_label
+                                    .as_deref()
+                                    .unwrap_or("Primary")
+                                    .to_uppercase()
+                            ),
+                            session_pct,
+                            show_as_used,
+                            provider.session_reset.as_deref(),
+                            metric_severity_color(display_percent),
+                            content_width,
+                            provider.session_pace_percent,
+                            provider.session_pace_lasts_to_reset,
+                        );
+                    }
+                    if let Some(weekly_pct) = provider.weekly_percent {
+                        ui.add_space(12.0);
+                        let display_percent = usage_display_percent(weekly_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            "Wöchentlich",
+                            weekly_pct,
+                            show_as_used,
+                            provider.weekly_reset.as_deref(),
+                            pace_severity_color(display_percent, provider.pace_percent),
+                            content_width,
+                            provider.pace_percent,
+                            provider.pace_lasts_to_reset,
+                        );
+                    }
+                }
                 "codex" => {
                     if let Some(session_pct) = provider.session_percent {
                         let display_percent = usage_display_percent(session_pct, show_as_used);
@@ -2800,38 +3071,51 @@ fn draw_provider_detail_card(
                 "cursor" => {
                     if let Some(auto_pct) = provider.weekly_percent {
                         let display_percent = usage_display_percent(auto_pct, show_as_used);
-                        draw_metric_row(
+                        draw_metric_row_with_reset_color(
                             ui,
                             "Auto + Composer",
                             auto_pct,
                             show_as_used,
                             provider.weekly_reset.as_deref(),
-                            metric_severity_color(display_percent),
+                            cursor_metric_color(
+                                display_percent,
+                                provider.weekly_pace_percent,
+                                provider.weekly_pace_lasts_to_reset,
+                            ),
                             content_width,
-                            None,
-                            false,
+                            provider.weekly_pace_percent,
+                            provider.weekly_pace_lasts_to_reset,
+                            cursor_reset_time_color(auto_pct, provider.weekly_pace_percent),
                         );
                     }
 
                     if let Some(api_pct) = provider.model_percent {
                         ui.add_space(12.0);
                         let display_percent = usage_display_percent(api_pct, show_as_used);
-                        draw_metric_row(
+                        draw_metric_row_with_reset_color(
                             ui,
                             "API",
                             api_pct,
                             show_as_used,
-                            provider.session_reset.as_deref(),
-                            tinted(metric_severity_color(display_percent), 210),
+                            provider.model_reset.as_deref(),
+                            tinted(
+                                cursor_metric_color(
+                                    display_percent,
+                                    provider.model_pace_percent,
+                                    provider.model_pace_lasts_to_reset,
+                                ),
+                                210,
+                            ),
                             content_width,
-                            None,
-                            false,
+                            provider.model_pace_percent,
+                            provider.model_pace_lasts_to_reset,
+                            cursor_reset_time_color(api_pct, provider.model_pace_percent),
                         );
                     }
 
                     if let Some(total_pct) = provider.session_percent {
                         ui.add_space(12.0);
-                        draw_metric_summary_row(
+                        draw_metric_summary_row_with_reset_color(
                             ui,
                             "Total",
                             total_pct,
@@ -2846,6 +3130,7 @@ fn draw_provider_detail_card(
                                     ))
                                 })
                                 .unwrap_or(Theme::TEXT_PRIMARY),
+                            cursor_reset_time_color(total_pct, provider.session_pace_percent),
                         );
                     }
                 }
@@ -3258,13 +3543,14 @@ fn draw_horizontal_separator(ui: &mut egui::Ui, left_padding: f32) {
     });
 }
 
-fn draw_metric_summary_row(
+fn draw_metric_summary_row_with_reset_color(
     ui: &mut egui::Ui,
     title: &str,
     percent: f64,
     show_as_used: bool,
     reset_text: Option<&str>,
     value_color: Color32,
+    reset_color: Option<Color32>,
 ) {
     ui.horizontal(|ui| {
         ui.label(
@@ -3288,7 +3574,7 @@ fn draw_metric_summary_row(
                 ui.label(
                     RichText::new(format!("Resets in {}", reset))
                         .size(FontSize::XS)
-                        .color(Theme::TEXT_SECONDARY),
+                        .color(reset_color.unwrap_or(Theme::TEXT_SECONDARY)),
                 );
             }
         });
@@ -3392,8 +3678,8 @@ fn draw_usage_trend_log(ui: &mut egui::Ui, provider: &ProviderData) {
                             "· {}/h · 24h {}/d · 7d {}/d · {} · n={}",
                             per_hour, avg_24h, avg_7d, comparison, trend.sample_count
                         ))
-                            .size(FontSize::XS)
-                            .color(Theme::TEXT_SECONDARY),
+                        .size(FontSize::XS)
+                        .color(Theme::TEXT_SECONDARY),
                     );
                 });
             }
@@ -3558,6 +3844,58 @@ fn draw_metric_row(
     pace_percent: Option<f64>,
     pace_lasts_to_reset: bool,
 ) {
+    draw_metric_row_with_reset_color(
+        ui,
+        title,
+        percent,
+        show_as_used,
+        reset_text,
+        color,
+        _content_width,
+        pace_percent,
+        pace_lasts_to_reset,
+        None,
+    );
+}
+
+fn draw_metric_row_with_reset_color(
+    ui: &mut egui::Ui,
+    title: &str,
+    percent: f64,
+    show_as_used: bool,
+    reset_text: Option<&str>,
+    color: Color32,
+    _content_width: f32,
+    pace_percent: Option<f64>,
+    pace_lasts_to_reset: bool,
+    reset_color_override: Option<Color32>,
+) {
+    draw_metric_row_with_pace_mode(
+        ui,
+        title,
+        percent,
+        show_as_used,
+        reset_text,
+        color,
+        _content_width,
+        pace_percent,
+        pace_lasts_to_reset,
+        reset_color_override,
+    );
+}
+
+fn draw_metric_row_with_pace_mode(
+    ui: &mut egui::Ui,
+    title: &str,
+    percent: f64,
+    show_as_used: bool,
+    reset_text: Option<&str>,
+    color: Color32,
+    _content_width: f32,
+    pace_percent: Option<f64>,
+    pace_lasts_to_reset: bool,
+    reset_color_override: Option<Color32>,
+) {
     // Title - .font(.body).fontWeight(.medium)
     ui.label(
         RichText::new(title)
@@ -3618,7 +3956,7 @@ fn draw_metric_row(
 
         // Pace status indicator
         if let Some((pace_text, pace_color)) =
-            pace_status(display_percent, pace_percent, pace_lasts_to_reset)
+            pace_status_with_mode(display_percent, pace_percent, pace_lasts_to_reset)
         {
             ui.add_space(8.0);
             ui.label(
@@ -3630,9 +3968,11 @@ fn draw_metric_row(
 
         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
             if let Some(reset) = reset_text {
-                let reset_color = pace_status(display_percent, pace_percent, pace_lasts_to_reset)
-                    .map(|(_, color)| color)
-                    .unwrap_or(Theme::TEXT_SECONDARY);
+                let reset_color = reset_color_override.unwrap_or_else(|| {
+                    pace_status_with_mode(display_percent, pace_percent, pace_lasts_to_reset)
+                        .map(|(_, color)| color)
+                        .unwrap_or(Theme::TEXT_SECONDARY)
+                });
                 ui.label(
                     RichText::new(format!("Resets in {}", reset))
                         .size(FontSize::XS)

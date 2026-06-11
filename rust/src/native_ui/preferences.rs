@@ -1729,9 +1729,11 @@ impl PreferencesWindow {
                         (0, "Manual"),
                         (60, "1 min"),
                         (120, "2 min"),
+                        (180, "3 min"),
                         (300, "5 min"),
                         (600, "10 min"),
                         (900, "15 min"),
+                        (1800, "30 min"),
                     ];
 
                     egui::Frame::none()
@@ -4386,11 +4388,14 @@ fn render_advanced_tab(ui: &mut egui::Ui, shared_state: &Arc<Mutex<PreferencesSh
                 };
 
                 let intervals = [
-                    (0, "Never"),
-                    (30, "30 sec"),
+                    (0, "Manual"),
                     (60, "1 min"),
+                    (120, "2 min"),
+                    (180, "3 min"),
                     (300, "5 min"),
                     (600, "10 min"),
+                    (900, "15 min"),
+                    (1800, "30 min"),
                 ];
 
                 let current_label = intervals

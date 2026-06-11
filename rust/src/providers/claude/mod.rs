@@ -65,29 +65,15 @@ impl Provider for ClaudeProvider {
 
     async fn fetch_usage(&self, ctx: &FetchContext) -> Result<ProviderFetchResult, ProviderError> {
         match ctx.source_mode {
-            SourceMode::Auto => {
-                // Try OAuth first, then Web, then CLI
-                if let Ok(result) = self.fetch_via_oauth(ctx).await {
-                    return Ok(result);
-                }
-                if let Ok(result) = self.fetch_via_web(ctx).await {
-                    return Ok(result);
-                }
-                self.fetch_via_cli(ctx).await
-            }
+            SourceMode::Auto => self.fetch_via_oauth(ctx).await,
             SourceMode::OAuth => self.fetch_via_oauth(ctx).await,
-            SourceMode::Web => self.fetch_via_web(ctx).await,
-            SourceMode::Cli => self.fetch_via_cli(ctx).await,
+            SourceMode::Web => Err(ProviderError::UnsupportedSource(SourceMode::Web)),
+            SourceMode::Cli => Err(ProviderError::UnsupportedSource(SourceMode::Cli)),
         }
     }
 
     fn available_sources(&self) -> Vec<SourceMode> {
-        vec![
-            SourceMode::Auto,
-            SourceMode::OAuth,
-            SourceMode::Web,
-            SourceMode::Cli,
-        ]
+        vec![SourceMode::Auto, SourceMode::OAuth]
     }
 
     fn supports_oauth(&self) -> bool {
@@ -95,11 +81,11 @@ impl Provider for ClaudeProvider {
     }
 
     fn supports_web(&self) -> bool {
-        true
+        false
     }
 
     fn supports_cli(&self) -> bool {
-        true
+        false
     }
 
     fn detect_version(&self) -> Option<String> {
@@ -253,6 +239,12 @@ impl ClaudeProvider {
         // Extract identity info
         let email = extract_email(&clean);
         let login_method = extract_login_method(&clean);
+
+        if session_percent.is_none() {
+            return Err(ProviderError::Parse(
+                "Claude CLI output contained no recognizable session usage".to_string(),
+            ));
+        }
 
         // Extract reset times
         let session_reset = extract_reset_description(&clean, "current session");
@@ -524,4 +516,40 @@ fn clean_plan_name(text: &str) -> String {
     let re = Regex::new(r"\[\d+m").unwrap_or_else(|_| Regex::new(".^").unwrap());
     let result = re.replace_all(&cleaned, "");
     result.trim().to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn cli_output_without_usage_does_not_become_zero_percent() {
+        let provider = ClaudeProvider::new();
+        let result = provider.parse_cli_output("Claude Code is ready.");
+
+        assert!(matches!(result, Err(ProviderError::Parse(_))));
+    }
+
+    #[test]
+    fn cli_output_with_real_zero_percent_remains_valid() {
+        let provider = ClaudeProvider::new();
+        let result = provider
+            .parse_cli_output("Current session\n0% used")
+            .expect("real zero-percent usage should parse");
+
+        assert_eq!(result.usage.primary.used_percent, 0.0);
+    }
+
+    #[test]
+    fn dashboard_sources_are_oauth_only() {
+        let provider = ClaudeProvider::new();
+
+        assert_eq!(
+            provider.available_sources(),
+            vec![SourceMode::Auto, SourceMode::OAuth]
+        );
+        assert!(provider.supports_oauth());
+        assert!(!provider.supports_web());
+        assert!(!provider.supports_cli());
+    }
 }

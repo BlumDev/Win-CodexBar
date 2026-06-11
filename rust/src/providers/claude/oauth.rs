@@ -57,22 +57,29 @@ struct OAuthData {
     rate_limit_tier: Option<String>,
 }
 
+/// Response from the OAuth token refresh endpoint.
+#[derive(Debug, Deserialize)]
+struct RefreshTokenResponse {
+    access_token: String,
+    refresh_token: Option<String>,
+    /// Lifetime of the new access token in seconds.
+    expires_in: Option<i64>,
+}
+
 /// OAuth usage response from Claude API
+///
+/// The `api.anthropic.com/api/oauth/usage` endpoint returns snake_case keys
+/// (matching the claude.ai web API), so the field names map directly.
 #[derive(Debug, Deserialize)]
 pub struct OAuthUsageResponse {
-    #[serde(rename = "fiveHour")]
     pub five_hour: Option<UsageWindow>,
 
-    #[serde(rename = "sevenDay")]
     pub seven_day: Option<UsageWindow>,
 
-    #[serde(rename = "sevenDaySonnet")]
     pub seven_day_sonnet: Option<UsageWindow>,
 
-    #[serde(rename = "sevenDayOpus")]
     pub seven_day_opus: Option<UsageWindow>,
 
-    #[serde(rename = "extraUsage")]
     pub extra_usage: Option<ExtraUsage>,
 }
 
@@ -81,20 +88,16 @@ pub struct OAuthUsageResponse {
 pub struct UsageWindow {
     pub utilization: Option<f64>,
 
-    #[serde(rename = "resetsAt")]
     pub resets_at: Option<String>,
 }
 
 /// Extra usage (credits) info
 #[derive(Debug, Deserialize)]
 pub struct ExtraUsage {
-    #[serde(rename = "isEnabled")]
     pub is_enabled: Option<bool>,
 
-    #[serde(rename = "usedCredits")]
     pub used_credits: Option<f64>,
 
-    #[serde(rename = "monthlyLimit")]
     pub monthly_limit: Option<f64>,
 
     pub currency: Option<String>,
@@ -106,10 +109,14 @@ pub struct ClaudeOAuthFetcher {
 }
 
 impl ClaudeOAuthFetcher {
-    const USAGE_URL: &'static str = "https://api.claude.ai/api/usage";
+    const USAGE_URL: &'static str = "https://api.anthropic.com/api/oauth/usage";
     const CREDENTIALS_PATH: &'static str = ".claude/.credentials.json";
     const ENV_TOKEN_KEY: &'static str = "CODEXBAR_CLAUDE_OAUTH_TOKEN";
     const ENV_SCOPES_KEY: &'static str = "CODEXBAR_CLAUDE_OAUTH_SCOPES";
+    /// OAuth token endpoint used to exchange a refresh token for a new access token.
+    const TOKEN_URL: &'static str = "https://console.anthropic.com/v1/oauth/token";
+    /// Public OAuth client id used by Claude Code (same one the `claude` CLI uses).
+    const CLIENT_ID: &'static str = "9d1c250a-e61b-44d9-88ed-5944d1962f5e";
 
     pub fn new() -> Self {
         Self {
@@ -117,12 +124,148 @@ impl ClaudeOAuthFetcher {
         }
     }
 
-    /// Load credentials and fetch usage
+    /// Load credentials and fetch usage.
+    ///
+    /// If the access token is expired (or the API rejects it with 401) and a
+    /// refresh token is available, transparently refresh the token, persist the
+    /// rotated credentials back to `~/.claude/.credentials.json`, and retry.
+    /// This mirrors what the `claude` CLI does, so the user never has to run
+    /// `claude` manually just to keep CodexBar's reading alive.
     pub async fn fetch(&self) -> Result<ProviderFetchResult, ProviderError> {
-        let credentials = self.load_credentials()?;
-        let usage_response = self.fetch_usage(&credentials).await?;
+        let mut credentials = self.load_credentials()?;
+
+        // Proactively refresh when we already know the token is expired.
+        if credentials.is_expired() && credentials.refresh_token.is_some() {
+            let refresh_token = credentials.refresh_token.clone().unwrap();
+            credentials = self.refresh_and_persist(&refresh_token).await?;
+        }
+
+        let usage_response = match self.fetch_usage(&credentials).await {
+            Ok(response) => response,
+            // Reactive refresh: the token was accepted as "not expired" locally
+            // but the API still rejected it (clock skew, early revocation, ...).
+            Err(ProviderError::OAuth(_)) if credentials.refresh_token.is_some() => {
+                let refresh_token = credentials.refresh_token.clone().unwrap();
+                credentials = self.refresh_and_persist(&refresh_token).await?;
+                self.fetch_usage(&credentials).await?
+            }
+            Err(e) => return Err(e),
+        };
+
         let usage = self.build_usage_snapshot(&usage_response, &credentials);
         Ok(ProviderFetchResult::new(usage, "oauth"))
+    }
+
+    /// Exchange a refresh token for a fresh access token, write the rotated
+    /// credentials back to the credentials file, and return the updated set.
+    async fn refresh_and_persist(
+        &self,
+        refresh_token: &str,
+    ) -> Result<ClaudeOAuthCredentials, ProviderError> {
+        let body = serde_json::json!({
+            "grant_type": "refresh_token",
+            "refresh_token": refresh_token,
+            "client_id": Self::CLIENT_ID,
+        });
+
+        let response = self
+            .client
+            .post(Self::TOKEN_URL)
+            .json(&body)
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await?;
+
+        if !response.status().is_success() {
+            let status = response.status();
+            let text = response.text().await.unwrap_or_default();
+            return Err(ProviderError::OAuth(format!(
+                "Token refresh failed ({}): {}. Run `claude` to re-authenticate.",
+                status,
+                text.chars().take(200).collect::<String>()
+            )));
+        }
+
+        let refreshed: RefreshTokenResponse = response.json().await.map_err(|e| {
+            ProviderError::Parse(format!("Failed to parse token refresh response: {}", e))
+        })?;
+
+        // Refresh tokens rotate on every use, so a new one MUST be persisted or
+        // the next refresh will fail. Fall back to the old one only if the
+        // server did not return a replacement.
+        let new_refresh = refreshed
+            .refresh_token
+            .clone()
+            .unwrap_or_else(|| refresh_token.to_string());
+
+        let expires_at = refreshed.expires_in.map(|secs| Utc::now() + chrono::Duration::seconds(secs));
+
+        self.persist_refreshed_tokens(
+            &refreshed.access_token,
+            &new_refresh,
+            expires_at,
+        )?;
+
+        // Reload from disk so we pick up everything (scopes, tier, ...) plus the
+        // freshly written tokens, keeping a single source of truth.
+        self.load_from_file()
+    }
+
+    /// Surgically update the three token fields inside the credentials file
+    /// without dropping any other keys (subscriptionType, mcpOAuth, ...).
+    /// Written atomically via a temp file + rename to avoid corrupting the file
+    /// if the `claude` CLI reads it concurrently.
+    fn persist_refreshed_tokens(
+        &self,
+        access_token: &str,
+        refresh_token: &str,
+        expires_at: Option<DateTime<Utc>>,
+    ) -> Result<(), ProviderError> {
+        let path = self.credentials_path()?;
+        let content = std::fs::read_to_string(&path).map_err(|e| {
+            ProviderError::OAuth(format!("Failed to read credentials file: {}", e))
+        })?;
+
+        let mut root: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
+            ProviderError::OAuth(format!("Invalid credentials format: {}", e))
+        })?;
+
+        let oauth = root
+            .get_mut("claudeAiOauth")
+            .and_then(|v| v.as_object_mut())
+            .ok_or_else(|| {
+                ProviderError::OAuth("Missing claudeAiOauth section in credentials".to_string())
+            })?;
+
+        oauth.insert(
+            "accessToken".to_string(),
+            serde_json::Value::String(access_token.to_string()),
+        );
+        oauth.insert(
+            "refreshToken".to_string(),
+            serde_json::Value::String(refresh_token.to_string()),
+        );
+        if let Some(expires_at) = expires_at {
+            let millis = expires_at.timestamp_millis();
+            oauth.insert(
+                "expiresAt".to_string(),
+                serde_json::Value::Number(millis.into()),
+            );
+        }
+
+        let serialized = serde_json::to_string_pretty(&root).map_err(|e| {
+            ProviderError::OAuth(format!("Failed to serialize credentials: {}", e))
+        })?;
+
+        let tmp_path = path.with_extension("json.tmp");
+        std::fs::write(&tmp_path, serialized).map_err(|e| {
+            ProviderError::OAuth(format!("Failed to write credentials: {}", e))
+        })?;
+        std::fs::rename(&tmp_path, &path).map_err(|e| {
+            ProviderError::OAuth(format!("Failed to replace credentials file: {}", e))
+        })?;
+
+        Ok(())
     }
 
     /// Load OAuth credentials from environment or file

@@ -144,54 +144,69 @@ impl CursorApi {
             .billing_cycle_end
             .as_ref()
             .and_then(|s| parse_iso_date(s));
+        let billing_start = summary
+            .billing_cycle_start
+            .as_ref()
+            .and_then(|s| parse_iso_date(s));
+        let billing_window_minutes = billing_window_minutes(billing_start, billing_end);
 
-        let (percent_used, secondary, model_specific, cost_snapshot) = if let Some(individual) =
-            &summary.individual_usage
-        {
-            if let Some(plan) = &individual.plan {
-                let used_cents = plan.used.unwrap_or(0) as f64;
-                let limit_cents = plan
-                    .breakdown
-                    .as_ref()
-                    .and_then(|b| b.total)
-                    .or(plan.limit)
-                    .unwrap_or(0) as f64;
+        let (percent_used, secondary, model_specific, cost_snapshot) =
+            if let Some(individual) = &summary.individual_usage {
+                if let Some(plan) = &individual.plan {
+                    let used_cents = plan.used.unwrap_or(0) as f64;
+                    let limit_cents = plan
+                        .breakdown
+                        .as_ref()
+                        .and_then(|b| b.total)
+                        .or(plan.limit)
+                        .unwrap_or(0) as f64;
 
-                let percent = if let Some(total_percent) = plan.total_percent_used {
-                    normalize_cursor_percent(total_percent)
-                } else if summary.is_unlimited == Some(true) {
-                    0.0
-                } else if limit_cents > 0.0 {
-                    (used_cents / limit_cents) * 100.0
+                    let percent = if let Some(total_percent) = plan.total_percent_used {
+                        normalize_cursor_percent(total_percent)
+                    } else if summary.is_unlimited == Some(true) {
+                        0.0
+                    } else if limit_cents > 0.0 {
+                        (used_cents / limit_cents) * 100.0
+                    } else {
+                        0.0
+                    };
+
+                    let secondary = plan.auto_percent_used.map(|v| {
+                        RateWindow::with_details(
+                            normalize_cursor_percent(v),
+                            billing_window_minutes,
+                            billing_end,
+                            None,
+                        )
+                    });
+
+                    let model_specific = plan.api_percent_used.map(|v| {
+                        RateWindow::with_details(
+                            normalize_cursor_percent(v),
+                            billing_window_minutes,
+                            billing_end,
+                            None,
+                        )
+                    });
+
+                    let mut cost = CostSnapshot::new(used_cents / 100.0, "USD", "Monthly");
+                    if limit_cents > 0.0 {
+                        cost = cost.with_limit(limit_cents / 100.0);
+                    }
+                    if let Some(reset) = billing_end {
+                        cost = cost.with_resets_at(reset);
+                    }
+
+                    (percent, secondary, model_specific, Some(cost))
                 } else {
-                    0.0
-                };
-
-                let secondary = plan.auto_percent_used.map(|v| {
-                    RateWindow::with_details(normalize_cursor_percent(v), None, billing_end, None)
-                });
-
-                let model_specific = plan.api_percent_used.map(|v| {
-                    RateWindow::with_details(normalize_cursor_percent(v), None, billing_end, None)
-                });
-
-                let mut cost = CostSnapshot::new(used_cents / 100.0, "USD", "Monthly");
-                if limit_cents > 0.0 {
-                    cost = cost.with_limit(limit_cents / 100.0);
+                    (0.0, None, None, None)
                 }
-                if let Some(reset) = billing_end {
-                    cost = cost.with_resets_at(reset);
-                }
-
-                (percent, secondary, model_specific, Some(cost))
             } else {
                 (0.0, None, None, None)
-            }
-        } else {
-            (0.0, None, None, None)
-        };
+            };
 
-        let primary = RateWindow::with_details(percent_used, None, billing_end, None);
+        let primary =
+            RateWindow::with_details(percent_used, billing_window_minutes, billing_end, None);
 
         let plan_type = summary
             .membership_type
@@ -306,6 +321,21 @@ fn parse_iso_date(s: &str) -> Option<DateTime<Utc>> {
     }
 
     None
+}
+
+fn billing_window_minutes(
+    billing_start: Option<DateTime<Utc>>,
+    billing_end: Option<DateTime<Utc>>,
+) -> Option<u32> {
+    let (Some(start), Some(end)) = (billing_start, billing_end) else {
+        return None;
+    };
+    let minutes = end.signed_duration_since(start).num_minutes();
+    if minutes > 0 {
+        Some(minutes.min(u32::MAX as i64) as u32)
+    } else {
+        None
+    }
 }
 
 fn capitalize(s: &str) -> String {
