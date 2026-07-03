@@ -36,6 +36,8 @@ use crate::usage_log::{
     UsageTrendSummary, append_and_summarize_usage,
 };
 
+const RATE_LIMIT_BACKOFF: Duration = Duration::from_secs(15 * 60);
+
 #[cfg(windows)]
 fn restore_main_window() {
     use windows::Win32::UI::WindowsAndMessaging::{
@@ -680,12 +682,26 @@ fn random_surprise_delay() -> Duration {
     Duration::from_secs(secs)
 }
 
+fn is_rate_limit_error(error: &str) -> bool {
+    let lower = error.to_ascii_lowercase();
+    error.contains("429") || lower.contains("too many requests") || lower.contains("rate limited")
+}
+
+fn has_visible_usage(provider: &ProviderData) -> bool {
+    provider.session_percent.is_some()
+        || provider.weekly_percent.is_some()
+        || provider.model_percent.is_some()
+        || provider.credits_remaining.is_some()
+        || provider.cost_used.is_some()
+}
+
 struct SharedState {
     providers: Vec<ProviderData>,
     selected_provider_idx: usize, // Index of selected provider in grid
     last_codex_sample: Option<CodexUsageSample>,
     codex_window_ratio: Option<CodexWindowRatio>,
     last_refresh: Instant,
+    refresh_backoff_until: Option<Instant>,
     is_refreshing: bool,
     loading_pattern: LoadingPattern,
     loading_phase: f64,
@@ -749,6 +765,7 @@ impl CodexBarApp {
             last_refresh: Instant::now()
                 .checked_sub(Duration::from_secs(999))
                 .unwrap_or_else(Instant::now),
+            refresh_backoff_until: None,
             is_refreshing: false,
             loading_pattern: LoadingPattern::random(),
             loading_phase: 0.0,
@@ -1184,6 +1201,8 @@ impl CodexBarApp {
 
                             if let Ok(mut s) = state.lock() {
                                 if idx < s.providers.len() {
+                                    let rate_limited =
+                                        result.error.as_deref().is_some_and(is_rate_limit_error);
                                     if result.error.is_none() {
                                         let codex_tokens = if id == ProviderId::Codex {
                                             JsonlScanner::codex_token_snapshot(30)
@@ -1223,7 +1242,22 @@ impl CodexBarApp {
                                             result.codex_window_ratio = s.codex_window_ratio;
                                         }
                                     }
-                                    s.providers[idx] = result;
+                                    if rate_limited {
+                                        s.refresh_backoff_until =
+                                            Some(Instant::now() + RATE_LIMIT_BACKOFF);
+                                    }
+
+                                    if rate_limited && has_visible_usage(&s.providers[idx]) {
+                                        let mut retained = s.providers[idx].clone();
+                                        retained.is_loading = false;
+                                        retained.error = result.error;
+                                        retained.status_level = result.status_level;
+                                        retained.status_description = result.status_description;
+                                        retained.cost_history = result.cost_history;
+                                        s.providers[idx] = retained;
+                                    } else {
+                                        s.providers[idx] = result;
+                                    }
                                 }
                             }
                         })
@@ -1440,7 +1474,11 @@ impl eframe::App for CodexBarApp {
             if self.settings.refresh_interval_secs == 0 {
                 false
             } else if let Ok(state) = self.state.lock() {
+                let in_backoff = state
+                    .refresh_backoff_until
+                    .is_some_and(|until| Instant::now() < until);
                 !state.is_refreshing
+                    && !in_backoff
                     && state.last_refresh.elapsed()
                         > Duration::from_secs(self.settings.refresh_interval_secs)
             } else {

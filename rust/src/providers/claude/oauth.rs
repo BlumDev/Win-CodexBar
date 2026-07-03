@@ -144,7 +144,9 @@ impl ClaudeOAuthFetcher {
             Ok(response) => response,
             // Reactive refresh: the token was accepted as "not expired" locally
             // but the API still rejected it (clock skew, early revocation, ...).
-            Err(ProviderError::OAuth(_)) if credentials.refresh_token.is_some() => {
+            Err(e)
+                if credentials.refresh_token.is_some() && Self::is_refreshable_oauth_error(&e) =>
+            {
                 let refresh_token = credentials.refresh_token.clone().unwrap();
                 credentials = self.refresh_and_persist(&refresh_token).await?;
                 self.fetch_usage(&credentials).await?
@@ -198,13 +200,11 @@ impl ClaudeOAuthFetcher {
             .clone()
             .unwrap_or_else(|| refresh_token.to_string());
 
-        let expires_at = refreshed.expires_in.map(|secs| Utc::now() + chrono::Duration::seconds(secs));
+        let expires_at = refreshed
+            .expires_in
+            .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
 
-        self.persist_refreshed_tokens(
-            &refreshed.access_token,
-            &new_refresh,
-            expires_at,
-        )?;
+        self.persist_refreshed_tokens(&refreshed.access_token, &new_refresh, expires_at)?;
 
         // Reload from disk so we pick up everything (scopes, tier, ...) plus the
         // freshly written tokens, keeping a single source of truth.
@@ -222,13 +222,11 @@ impl ClaudeOAuthFetcher {
         expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), ProviderError> {
         let path = self.credentials_path()?;
-        let content = std::fs::read_to_string(&path).map_err(|e| {
-            ProviderError::OAuth(format!("Failed to read credentials file: {}", e))
-        })?;
+        let content = std::fs::read_to_string(&path)
+            .map_err(|e| ProviderError::OAuth(format!("Failed to read credentials file: {}", e)))?;
 
-        let mut root: serde_json::Value = serde_json::from_str(&content).map_err(|e| {
-            ProviderError::OAuth(format!("Invalid credentials format: {}", e))
-        })?;
+        let mut root: serde_json::Value = serde_json::from_str(&content)
+            .map_err(|e| ProviderError::OAuth(format!("Invalid credentials format: {}", e)))?;
 
         let oauth = root
             .get_mut("claudeAiOauth")
@@ -253,14 +251,12 @@ impl ClaudeOAuthFetcher {
             );
         }
 
-        let serialized = serde_json::to_string_pretty(&root).map_err(|e| {
-            ProviderError::OAuth(format!("Failed to serialize credentials: {}", e))
-        })?;
+        let serialized = serde_json::to_string_pretty(&root)
+            .map_err(|e| ProviderError::OAuth(format!("Failed to serialize credentials: {}", e)))?;
 
         let tmp_path = path.with_extension("json.tmp");
-        std::fs::write(&tmp_path, serialized).map_err(|e| {
-            ProviderError::OAuth(format!("Failed to write credentials: {}", e))
-        })?;
+        std::fs::write(&tmp_path, serialized)
+            .map_err(|e| ProviderError::OAuth(format!("Failed to write credentials: {}", e)))?;
         std::fs::rename(&tmp_path, &path).map_err(|e| {
             ProviderError::OAuth(format!("Failed to replace credentials file: {}", e))
         })?;
@@ -361,6 +357,15 @@ impl ClaudeOAuthFetcher {
         dirs::home_dir()
             .map(|home| home.join(Self::CREDENTIALS_PATH))
             .ok_or_else(|| ProviderError::OAuth("Could not find home directory".to_string()))
+    }
+
+    fn is_refreshable_oauth_error(error: &ProviderError) -> bool {
+        let ProviderError::OAuth(message) = error else {
+            return false;
+        };
+
+        message.contains("OAuth token invalid or expired")
+            || message.contains("OAuth token expired")
     }
 
     /// Fetch usage data using OAuth credentials
@@ -516,4 +521,31 @@ fn parse_iso8601_date(s: &str) -> Option<DateTime<Utc>> {
 /// Format a reset date for display
 fn format_reset_date(date: DateTime<Utc>) -> String {
     date.format("%b %-d at %-I:%M%p").to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn refreshes_only_token_expiry_errors() {
+        assert!(ClaudeOAuthFetcher::is_refreshable_oauth_error(
+            &ProviderError::OAuth(
+                "OAuth token invalid or expired. Run `claude` to re-authenticate.".to_string()
+            )
+        ));
+        assert!(ClaudeOAuthFetcher::is_refreshable_oauth_error(
+            &ProviderError::OAuth("OAuth token expired. Run `claude` to refresh.".to_string())
+        ));
+    }
+
+    #[test]
+    fn does_not_refresh_generic_api_errors() {
+        assert!(!ClaudeOAuthFetcher::is_refreshable_oauth_error(
+            &ProviderError::OAuth("API error 429 Too Many Requests: ".to_string())
+        ));
+        assert!(!ClaudeOAuthFetcher::is_refreshable_oauth_error(
+            &ProviderError::Other("not oauth".to_string())
+        ));
+    }
 }
