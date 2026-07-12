@@ -421,10 +421,31 @@ fn usage_display_percent(used_percent: f64, show_as_used: bool) -> f64 {
 }
 
 fn usage_display_label(display_percent: f64, show_as_used: bool) -> String {
-    if show_as_used {
-        format!("{:.0}% used", display_percent)
+    let percent = if (0.0..1.0).contains(&display_percent) {
+        format!("{:.1}%", display_percent)
     } else {
-        format!("{:.0}% remaining", display_percent)
+        format!("{:.0}%", display_percent)
+    };
+
+    if show_as_used {
+        format!("{} used", percent)
+    } else {
+        format!("{} remaining", percent)
+    }
+}
+
+#[cfg(test)]
+mod usage_display_tests {
+    use super::usage_display_label;
+
+    #[test]
+    fn keeps_small_nonzero_usage_visible() {
+        assert_eq!(usage_display_label(0.2667, true), "0.3% used");
+    }
+
+    #[test]
+    fn keeps_whole_percentage_formatting() {
+        assert_eq!(usage_display_label(6.15, true), "6% used");
     }
 }
 
