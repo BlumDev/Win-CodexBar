@@ -351,8 +351,8 @@ fn normalize_cursor_percent(value: f64) -> f64 {
         return 0.0;
     }
 
-    let percent = if value <= 1.0 { value * 100.0 } else { value };
-    percent.clamp(0.0, 100.0)
+    // Cursor reports these fields in percentage units, even below 1%.
+    value.clamp(0.0, 100.0)
 }
 
 #[cfg(test)]
@@ -368,7 +368,7 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_build_result_with_lanes() {
+    fn test_cursor_build_result_preserves_small_percentage_lanes() {
         let json = r#"{
             "billingCycleStart": "2026-03-01T00:00:00Z",
             "billingCycleEnd": "2026-04-01T00:00:00Z",
@@ -377,9 +377,9 @@ mod tests {
                 "plan": {
                     "used": 1500,
                     "limit": 5000,
-                    "totalPercentUsed": 0.30,
-                    "autoPercentUsed": 0.20,
-                    "apiPercentUsed": 0.10
+                    "totalPercentUsed": 6.15,
+                    "autoPercentUsed": 0.0,
+                    "apiPercentUsed": 0.2667
                 }
             }
         }"#;
@@ -388,14 +388,14 @@ mod tests {
         let (primary, secondary, model_specific, cost, _email, plan_type) =
             api().build_result(summary, None).unwrap();
 
-        assert!((primary.used_percent - 30.0).abs() < 0.01);
+        assert!((primary.used_percent - 6.15).abs() < 0.01);
 
         let sec = secondary.expect("secondary should be present");
-        assert!((sec.used_percent - 20.0).abs() < 0.01);
+        assert!((sec.used_percent).abs() < 0.01);
         assert!(sec.resets_at.is_some());
 
         let ms = model_specific.expect("model_specific should be present");
-        assert!((ms.used_percent - 10.0).abs() < 0.01);
+        assert!((ms.used_percent - 0.2667).abs() < 0.01);
         assert!(ms.resets_at.is_some());
 
         assert!(cost.is_some());
@@ -464,7 +464,7 @@ mod tests {
         let summary = parse_summary(json);
         let (primary, _, _, cost, _, _) = api().build_result(summary, None).unwrap();
 
-        assert!((primary.used_percent - 16.0).abs() < 0.01);
+        assert!((primary.used_percent - 0.16).abs() < 0.01);
         let cost = cost.expect("cost should exist from plan usage");
         assert!((cost.used - 8.0).abs() < 0.01);
         assert_eq!(cost.limit, Some(50.0));
