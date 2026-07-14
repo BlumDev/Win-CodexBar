@@ -6,6 +6,10 @@ use serde::{Deserialize, Serialize};
 /// Represents a rate limit window with usage percentage and reset time
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct RateWindow {
+    /// Whether this window was present in the provider response.
+    #[serde(default = "default_true", skip_serializing_if = "is_true")]
+    pub available: bool,
+
     /// Percentage of the window that has been used (0-100)
     pub used_percent: f64,
 
@@ -26,6 +30,7 @@ impl RateWindow {
     /// Create a new rate window
     pub fn new(used_percent: f64) -> Self {
         Self {
+            available: true,
             used_percent: used_percent.clamp(0.0, 100.0),
             window_minutes: None,
             resets_at: None,
@@ -41,10 +46,22 @@ impl RateWindow {
         reset_description: Option<String>,
     ) -> Self {
         Self {
+            available: true,
             used_percent: used_percent.clamp(0.0, 100.0),
             window_minutes,
             resets_at,
             reset_description,
+        }
+    }
+
+    /// Create a placeholder for a provider window that is not currently reported.
+    pub fn unavailable() -> Self {
+        Self {
+            available: false,
+            used_percent: 0.0,
+            window_minutes: None,
+            resets_at: None,
+            reset_description: None,
         }
     }
 
@@ -55,12 +72,12 @@ impl RateWindow {
 
     /// Check if the window is exhausted (>= 100% used)
     pub fn is_exhausted(&self) -> bool {
-        self.used_percent >= 100.0
+        self.available && self.used_percent >= 100.0
     }
 
     /// Check if the window is nearly exhausted (>= 90% used)
     pub fn is_nearly_exhausted(&self) -> bool {
-        self.used_percent >= 90.0
+        self.available && self.used_percent >= 90.0
     }
 
     /// Format the reset time as a countdown string
@@ -85,6 +102,14 @@ impl RateWindow {
             Some(format!("{}m", minutes))
         }
     }
+}
+
+fn default_true() -> bool {
+    true
+}
+
+fn is_true(value: &bool) -> bool {
+    *value
 }
 
 impl Default for RateWindow {

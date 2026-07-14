@@ -238,17 +238,20 @@ impl CodexApi {
         if let Some(rate_limit) = json.get("rate_limit") {
             let primary = rate_limit
                 .get("primary_window")
-                .map(|w| self.parse_window(w))
-                .unwrap_or_else(|| RateWindow::new(0.0));
+                .filter(|w| !w.is_null())
+                .map(|w| self.parse_window(w));
 
             let secondary = rate_limit
                 .get("secondary_window")
+                .filter(|w| !w.is_null())
                 .map(|w| self.parse_window(w));
 
             let code_review = rate_limit
                 .get("code_review_window")
+                .filter(|w| !w.is_null())
                 .map(|w| self.parse_window(w));
 
+            let (primary, secondary) = classify_codex_windows(primary, secondary);
             return (primary, secondary, code_review);
         }
 
@@ -530,5 +533,87 @@ fn capitalize(s: &str) -> String {
     match chars.next() {
         None => String::new(),
         Some(first) => first.to_uppercase().chain(chars).collect(),
+    }
+}
+
+fn classify_codex_windows(
+    first: Option<RateWindow>,
+    second: Option<RateWindow>,
+) -> (RateWindow, Option<RateWindow>) {
+    let mut windows: Vec<RateWindow> = [first, second].into_iter().flatten().collect();
+    windows.sort_by_key(|window| window.window_minutes.unwrap_or(0));
+
+    match windows.len() {
+        0 => (RateWindow::unavailable(), None),
+        1 => {
+            let window = windows.remove(0);
+            if window
+                .window_minutes
+                .is_some_and(|minutes| minutes >= 24 * 60)
+            {
+                (RateWindow::unavailable(), Some(window))
+            } else {
+                (window, None)
+            }
+        }
+        _ => {
+            let primary = windows.remove(0);
+            let secondary = windows.pop();
+            (primary, secondary)
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn maps_weekly_only_window_by_duration_without_fabricating_secondary_zero() {
+        let json = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 14,
+                    "limit_window_seconds": 604800,
+                    "reset_at": 1784489422
+                },
+                "secondary_window": null
+            }
+        });
+
+        let (usage, _) = CodexApi::new().build_result_from_json(&json).unwrap();
+
+        assert_ne!(usage.primary.window_minutes, Some(10_080));
+        let weekly = usage
+            .secondary
+            .expect("the seven-day window must be exposed as weekly usage");
+        assert_eq!(weekly.window_minutes, Some(10_080));
+        assert!((weekly.used_percent - 14.0).abs() < f64::EPSILON);
+    }
+
+    #[test]
+    fn preserves_short_primary_and_weekly_secondary_windows() {
+        let json = serde_json::json!({
+            "plan_type": "plus",
+            "rate_limit": {
+                "primary_window": {
+                    "used_percent": 13,
+                    "limit_window_seconds": 18000
+                },
+                "secondary_window": {
+                    "used_percent": 42,
+                    "limit_window_seconds": 604800
+                }
+            }
+        });
+
+        let (usage, _) = CodexApi::new().build_result_from_json(&json).unwrap();
+
+        assert_eq!(usage.primary.window_minutes, Some(300));
+        assert!((usage.primary.used_percent - 13.0).abs() < f64::EPSILON);
+        let weekly = usage.secondary.expect("weekly window should be present");
+        assert_eq!(weekly.window_minutes, Some(10_080));
+        assert!((weekly.used_percent - 42.0).abs() < f64::EPSILON);
     }
 }

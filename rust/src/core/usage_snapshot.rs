@@ -83,16 +83,18 @@ impl UsageSnapshot {
     pub fn most_restrictive(&self) -> &RateWindow {
         let mut most = &self.primary;
 
-        if let Some(ref secondary) = self.secondary {
-            if secondary.used_percent > most.used_percent {
-                most = secondary;
-            }
+        if let Some(ref secondary) = self.secondary
+            && (!most.available
+                || (secondary.available && secondary.used_percent > most.used_percent))
+        {
+            most = secondary;
         }
 
-        if let Some(ref model_specific) = self.model_specific {
-            if model_specific.used_percent > most.used_percent {
-                most = model_specific;
-            }
+        if let Some(ref model_specific) = self.model_specific
+            && (!most.available
+                || (model_specific.available && model_specific.used_percent > most.used_percent))
+        {
+            most = model_specific;
         }
 
         most

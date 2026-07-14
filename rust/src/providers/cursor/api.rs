@@ -4,10 +4,14 @@
 
 use crate::browser::cookies::get_cookie_header;
 use crate::core::{CostSnapshot, ProviderError, RateWindow};
-use chrono::{DateTime, Utc};
+use chrono::{DateTime, TimeZone, Utc};
+use rusqlite::{Connection, OpenFlags, OptionalExtension};
 use serde::Deserialize;
+use std::path::PathBuf;
 
 const BASE_URL: &str = "https://cursor.com";
+const DESKTOP_API_URL: &str =
+    "https://api2.cursor.sh/aiserver.v1.DashboardService/GetCurrentPeriodUsage";
 const COOKIE_DOMAINS: [&str; 2] = ["cursor.com", "cursor.sh"];
 
 type CursorUsageResult = (
@@ -33,10 +37,48 @@ impl CursorApi {
 
     /// Fetch usage information from Cursor API
     /// Returns (primary, secondary, model_specific, cost, email, plan_type)
-    pub async fn fetch_usage(&self) -> Result<CursorUsageResult, ProviderError> {
-        // Try to get cookies from browser
+    pub async fn fetch_usage(&self) -> Result<(CursorUsageResult, &'static str), ProviderError> {
+        match self.fetch_usage_from_desktop().await {
+            Ok(result) => return Ok((result, "desktop")),
+            Err(error) => {
+                tracing::debug!("Cursor desktop auth unavailable: {}", error);
+            }
+        }
+
         let cookie_header = self.get_cookie_header()?;
-        self.fetch_usage_with_cookie_header(&cookie_header).await
+        self.fetch_usage_with_cookie_header(&cookie_header)
+            .await
+            .map(|result| (result, "web"))
+    }
+
+    async fn fetch_usage_from_desktop(&self) -> Result<CursorUsageResult, ProviderError> {
+        let auth = load_cursor_desktop_auth()?.ok_or(ProviderError::NoCookies)?;
+        let response = self
+            .client
+            .post(DESKTOP_API_URL)
+            .bearer_auth(&auth.access_token)
+            .header("Accept", "application/json")
+            .json(&serde_json::json!({}))
+            .timeout(std::time::Duration::from_secs(15))
+            .send()
+            .await?;
+
+        if response.status() == 401 || response.status() == 403 {
+            return Err(ProviderError::AuthRequired);
+        }
+        if !response.status().is_success() {
+            return Err(ProviderError::Other(format!(
+                "Cursor desktop API returned {}",
+                response.status()
+            )));
+        }
+
+        let mut summary: UsageSummary = response
+            .json()
+            .await
+            .map_err(|error| ProviderError::Parse(error.to_string()))?;
+        summary.membership_type = auth.membership_type;
+        self.build_result(summary, None)
     }
 
     /// Fetch usage information using an explicit cookie header
@@ -143,15 +185,50 @@ impl CursorApi {
         let billing_end = summary
             .billing_cycle_end
             .as_ref()
-            .and_then(|s| parse_iso_date(s));
+            .and_then(|s| parse_cursor_date(s));
         let billing_start = summary
             .billing_cycle_start
             .as_ref()
-            .and_then(|s| parse_iso_date(s));
+            .and_then(|s| parse_cursor_date(s));
         let billing_window_minutes = billing_window_minutes(billing_start, billing_end);
 
         let (percent_used, secondary, model_specific, cost_snapshot) =
-            if let Some(individual) = &summary.individual_usage {
+            if let Some(plan) = summary.plan_usage.as_ref() {
+                let total_spend_cents = plan.total_spend.unwrap_or(0) as f64;
+                let included_spend_cents = plan.included_spend.unwrap_or(0) as f64;
+                let limit_cents = plan.limit.unwrap_or(0) as f64;
+                let percent = if limit_cents > 0.0 {
+                    (included_spend_cents / limit_cents) * 100.0
+                } else {
+                    plan.total_percent_used
+                        .map(normalize_cursor_percent)
+                        .unwrap_or(0.0)
+                };
+                let secondary = plan.auto_percent_used.map(|value| {
+                    RateWindow::with_details(
+                        normalize_cursor_percent(value),
+                        billing_window_minutes,
+                        billing_end,
+                        None,
+                    )
+                });
+                let model_specific = plan.api_percent_used.map(|value| {
+                    RateWindow::with_details(
+                        normalize_cursor_percent(value),
+                        billing_window_minutes,
+                        billing_end,
+                        None,
+                    )
+                });
+                let mut cost = CostSnapshot::new(total_spend_cents / 100.0, "USD", "Monthly");
+                if limit_cents > 0.0 {
+                    cost = cost.with_limit(limit_cents / 100.0);
+                }
+                if let Some(reset) = billing_end {
+                    cost = cost.with_resets_at(reset);
+                }
+                (percent, secondary, model_specific, Some(cost))
+            } else if let Some(individual) = &summary.individual_usage {
                 if let Some(plan) = &individual.plan {
                     let used_cents = plan.used.unwrap_or(0) as f64;
                     let limit_cents = plan
@@ -249,6 +326,7 @@ struct UsageSummary {
     limit_type: Option<String>,
     is_unlimited: Option<bool>,
     individual_usage: Option<IndividualUsage>,
+    plan_usage: Option<PlanUsage>,
     team_usage: Option<TeamUsage>,
 }
 
@@ -270,6 +348,8 @@ struct PlanUsage {
     auto_percent_used: Option<f64>,
     api_percent_used: Option<f64>,
     total_percent_used: Option<f64>,
+    total_spend: Option<i64>,
+    included_spend: Option<i64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,7 +389,11 @@ struct UserInfo {
 
 // --- Helper functions ---
 
-fn parse_iso_date(s: &str) -> Option<DateTime<Utc>> {
+fn parse_cursor_date(s: &str) -> Option<DateTime<Utc>> {
+    if let Ok(milliseconds) = s.parse::<i64>() {
+        return Utc.timestamp_millis_opt(milliseconds).single();
+    }
+
     // Try with fractional seconds
     if let Ok(dt) = DateTime::parse_from_rfc3339(s) {
         return Some(dt.with_timezone(&Utc));
@@ -321,6 +405,63 @@ fn parse_iso_date(s: &str) -> Option<DateTime<Utc>> {
     }
 
     None
+}
+
+#[derive(Debug)]
+struct CursorDesktopAuth {
+    access_token: String,
+    membership_type: Option<String>,
+}
+
+fn cursor_state_db_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|path| {
+        path.join("Cursor")
+            .join("User")
+            .join("globalStorage")
+            .join("state.vscdb")
+    })
+}
+
+fn load_cursor_desktop_auth() -> Result<Option<CursorDesktopAuth>, ProviderError> {
+    let Some(path) = cursor_state_db_path() else {
+        return Ok(None);
+    };
+    if !path.exists() {
+        return Ok(None);
+    }
+
+    let connection =
+        Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY).map_err(|error| {
+            ProviderError::Other(format!("Failed to read Cursor auth store: {error}"))
+        })?;
+    let access_token: Option<String> = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/accessToken'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            ProviderError::Other(format!("Failed to read Cursor access token: {error}"))
+        })?;
+    let Some(access_token) = access_token.filter(|token| !token.trim().is_empty()) else {
+        return Ok(None);
+    };
+    let membership_type = connection
+        .query_row(
+            "SELECT value FROM ItemTable WHERE key = 'cursorAuth/stripeMembershipType'",
+            [],
+            |row| row.get(0),
+        )
+        .optional()
+        .map_err(|error| {
+            ProviderError::Other(format!("Failed to read Cursor membership type: {error}"))
+        })?;
+
+    Ok(Some(CursorDesktopAuth {
+        access_token,
+        membership_type,
+    }))
 }
 
 fn billing_window_minutes(
@@ -400,6 +541,41 @@ mod tests {
 
         assert!(cost.is_some());
         assert_eq!(plan_type.as_deref(), Some("Cursor Pro"));
+    }
+
+    #[test]
+    fn test_cursor_build_result_accepts_desktop_usage_payload() {
+        let json = r#"{
+            "billingCycleStart": "1781648722000",
+            "billingCycleEnd": "1784240722000",
+            "planUsage": {
+                "totalSpend": 421,
+                "includedSpend": 421,
+                "remaining": 1579,
+                "limit": 2000,
+                "autoPercentUsed": 0.0,
+                "apiPercentUsed": 9.355555555555556,
+                "totalPercentUsed": 2.158974358974359
+            },
+            "enabled": true
+        }"#;
+
+        let summary = parse_summary(json);
+        let (primary, secondary, model_specific, cost, _, _) =
+            api().build_result(summary, None).unwrap();
+
+        assert!((primary.used_percent - 21.05).abs() < 0.01);
+        assert_eq!(primary.window_minutes, Some(43_200));
+
+        let auto = secondary.expect("desktop payload includes the Auto lane");
+        assert!(auto.used_percent.abs() < f64::EPSILON);
+
+        let api_lane = model_specific.expect("desktop payload includes the API lane");
+        assert!((api_lane.used_percent - 9.355555555555556).abs() < 0.01);
+
+        let cost = cost.expect("desktop payload includes plan spend");
+        assert!((cost.used - 4.21).abs() < 0.01);
+        assert_eq!(cost.limit, Some(20.0));
     }
 
     #[test]

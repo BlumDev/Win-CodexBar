@@ -2485,7 +2485,10 @@ fn render_provider_detail_panel(
     // Extract data from entry or use defaults
     let account_email = entry.as_ref().and_then(|e| e.account_email.clone());
     let login_method = entry.as_ref().and_then(|e| e.login_method.clone());
-    let primary_rate = entry.as_ref().and_then(|e| e.primary.clone());
+    let primary_rate = entry
+        .as_ref()
+        .and_then(|e| e.primary.clone())
+        .filter(|rate| rate.available);
     let secondary_rate = entry.as_ref().and_then(|e| e.secondary.clone());
     let tertiary_rate = entry.as_ref().and_then(|e| e.tertiary.clone());
     let credits_remaining = entry.as_ref().and_then(|e| e.credits_remaining);

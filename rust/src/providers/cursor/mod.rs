@@ -61,7 +61,14 @@ impl Provider for CursorProvider {
         let fetch = if let Some(ref cookie_header) = ctx.manual_cookie_header {
             if !cookie_header.trim().is_empty() {
                 tracing::debug!("Using manual cookie header for Cursor");
-                self.api.fetch_usage_with_cookie_header(cookie_header).await
+                match self.api.fetch_usage_with_cookie_header(cookie_header).await {
+                    Ok(result) => Ok((result, "web")),
+                    Err(ProviderError::AuthRequired | ProviderError::NoCookies) => {
+                        tracing::debug!("Saved Cursor cookies expired; trying desktop auth");
+                        self.api.fetch_usage().await
+                    }
+                    Err(error) => Err(error),
+                }
             } else {
                 self.api.fetch_usage().await
             }
@@ -70,7 +77,7 @@ impl Provider for CursorProvider {
         };
 
         match fetch {
-            Ok((primary, secondary, model_specific, cost, email, plan_type)) => {
+            Ok(((primary, secondary, model_specific, cost, email, plan_type), source_label)) => {
                 let mut usage = UsageSnapshot::new(primary);
                 if let Some(sec) = secondary {
                     usage = usage.with_secondary(sec);
@@ -85,7 +92,7 @@ impl Provider for CursorProvider {
                     usage = usage.with_login_method(plan);
                 }
 
-                let mut result = ProviderFetchResult::new(usage, "web");
+                let mut result = ProviderFetchResult::new(usage, source_label);
                 if let Some(c) = cost {
                     result = result.with_cost(c);
                 }
