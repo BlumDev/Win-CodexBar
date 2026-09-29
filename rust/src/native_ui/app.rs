@@ -7,6 +7,10 @@ use eframe::egui::{
 use std::sync::mpsc::{self, Receiver};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
+use std::{process::Command, thread};
+
+#[cfg(windows)]
+use std::os::windows::process::CommandExt;
 
 use super::charts::{
     ChartPoint, CostHistoryChart, CreditsHistoryChart, ServiceUsage, UsageBreakdownChart,
@@ -95,6 +99,7 @@ pub struct ProviderData {
     pub model_name: Option<String>,
     pub plan: Option<String>,
     pub error: Option<String>,
+    pub notice: Option<String>,
     pub dashboard_url: Option<String>,
     pub pace_percent: Option<f64>,
     pub pace_lasts_to_reset: bool,
@@ -146,6 +151,7 @@ impl ProviderData {
             model_name: None,
             plan: None,
             error: None,
+            notice: None,
             dashboard_url: None,
             pace_percent: None,
             pace_lasts_to_reset: false,
@@ -248,6 +254,7 @@ impl ProviderData {
             },
             plan: snapshot.login_method.clone(),
             error: None,
+            notice: snapshot.notice.clone(),
             dashboard_url: metadata.dashboard_url.map(|s| s.to_string()),
             pace_percent: weekly_pace_percent,
             pace_lasts_to_reset: weekly_pace_lasts,
@@ -287,6 +294,7 @@ impl ProviderData {
             model_name: None,
             plan: None,
             error: Some(error),
+            notice: None,
             dashboard_url: None,
             pace_percent: None,
             pace_lasts_to_reset: false,
@@ -450,7 +458,8 @@ fn usage_display_label(display_percent: f64, show_as_used: bool) -> String {
 #[cfg(test)]
 mod usage_display_tests {
     use super::{
-        ProviderData, draw_provider_dashboard_stats, should_show_dashboard_provider,
+        ProviderData, ProviderRecoveryAction, claude_reauthentication_command,
+        draw_provider_dashboard_stats, provider_recovery_action, should_show_dashboard_provider,
         should_show_usage_trend, usage_display_label,
     };
     use crate::core::{
@@ -466,6 +475,67 @@ mod usage_display_tests {
     #[test]
     fn keeps_whole_percentage_formatting() {
         assert_eq!(usage_display_label(6.15, true), "6% used");
+    }
+
+    #[test]
+    fn offers_claude_reauthentication_for_invalid_refresh_token() {
+        let error = concat!(
+            "OAuth error: Token refresh failed (400 Bad Request): ",
+            "{\"error\":\"invalid_grant\",\"error_description\":\"Refresh token expired\"}"
+        );
+
+        assert_eq!(
+            provider_recovery_action("claude", error),
+            Some(ProviderRecoveryAction::ClaudeReauthenticate)
+        );
+    }
+
+    #[test]
+    fn offers_claude_reauthentication_for_login_expiry_notice() {
+        assert_eq!(
+            provider_recovery_action(
+                "claude",
+                "Claude login expires in 2 days. Run `claude auth login` to renew."
+            ),
+            Some(ProviderRecoveryAction::ClaudeReauthenticate)
+        );
+    }
+
+    #[test]
+    fn does_not_offer_claude_reauthentication_for_unrelated_errors() {
+        assert_eq!(
+            provider_recovery_action("claude", "OAuth error: API error 429 Too Many Requests"),
+            None
+        );
+        assert_eq!(
+            provider_recovery_action(
+                "claude",
+                "OAuth token does not meet scope requirement 'user:profile'"
+            ),
+            None
+        );
+        assert_eq!(
+            provider_recovery_action("codex", "OAuth token invalid or expired"),
+            None
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn claude_reauthentication_uses_visible_powershell_login() {
+        let command = claude_reauthentication_command();
+
+        assert_eq!(command.get_program(), "powershell.exe");
+        let args: Vec<_> = command.get_args().collect();
+        assert_eq!(
+            args,
+            [
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "claude auth login --claudeai"
+            ]
+        );
     }
 
     #[test]
@@ -823,6 +893,57 @@ fn is_rate_limit_error(error: &str) -> bool {
     error.contains("429") || lower.contains("too many requests") || lower.contains("rate limited")
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ProviderRecoveryAction {
+    ClaudeReauthenticate,
+}
+
+fn provider_recovery_action(provider_name: &str, error: &str) -> Option<ProviderRecoveryAction> {
+    if !provider_name.eq_ignore_ascii_case("claude") {
+        return None;
+    }
+
+    let error = error.to_ascii_lowercase();
+    let requires_reauthentication = error.contains("invalid_grant")
+        || error.contains("refresh token expired")
+        || error.contains("claude auth login")
+        || error.contains("oauth token invalid or expired")
+        || error.contains("oauth token expired")
+        || error.contains("oauth credentials not found")
+        || error.contains("oauth credentials missing")
+        || error.contains("oauth access token missing")
+        || error.contains("oauth access token is empty");
+    let requires_different_credentials =
+        error.contains("scope requirement") || error.contains("missing 'user:profile'");
+
+    (requires_reauthentication && !requires_different_credentials)
+        .then_some(ProviderRecoveryAction::ClaudeReauthenticate)
+}
+
+fn claude_reauthentication_command() -> Command {
+    #[cfg(windows)]
+    {
+        const CREATE_NEW_CONSOLE: u32 = 0x00000010;
+        let mut command = Command::new("powershell.exe");
+        command
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-Command",
+                "claude auth login --claudeai",
+            ])
+            .creation_flags(CREATE_NEW_CONSOLE);
+        command
+    }
+
+    #[cfg(not(windows))]
+    {
+        let mut command = Command::new("claude");
+        command.args(["auth", "login", "--claudeai"]);
+        command
+    }
+}
+
 fn has_visible_usage(provider: &ProviderData) -> bool {
     provider.session_percent.is_some()
         || provider.weekly_percent.is_some()
@@ -855,6 +976,7 @@ struct SharedState {
     login_provider: Option<String>,
     login_phase: LoginPhase,
     login_message: Option<String>,
+    refresh_after_login: bool,
 }
 
 pub struct CodexBarApp {
@@ -919,6 +1041,7 @@ impl CodexBarApp {
             login_provider: None,
             login_phase: LoginPhase::Idle,
             login_message: None,
+            refresh_after_login: false,
         }));
 
         // Initialize system tray based on settings
@@ -1419,6 +1542,54 @@ impl CodexBarApp {
         });
     }
 
+    fn start_claude_reauthentication(&self, ctx: egui::Context) {
+        if let Ok(mut state) = self.state.lock() {
+            if state.login_provider.as_deref() == Some("claude")
+                && state.login_phase != LoginPhase::Idle
+            {
+                return;
+            }
+            state.login_provider = Some("claude".to_string());
+            state.login_phase = LoginPhase::Requesting;
+            state.login_message = Some("Claude-Anmeldung läuft...".to_string());
+        }
+
+        let state = Arc::clone(&self.state);
+        thread::spawn(move || {
+            let result = claude_reauthentication_command().status();
+            if let Ok(mut state) = state.lock() {
+                match result {
+                    Ok(status) if status.success() => {
+                        state.login_phase = LoginPhase::Complete;
+                        state.login_message = Some("Claude-Anmeldung erfolgreich.".to_string());
+                        state.refresh_after_login = true;
+                    }
+                    Ok(status) => {
+                        let code = status
+                            .code()
+                            .map_or_else(|| "unbekannt".to_string(), |code| code.to_string());
+                        state.login_provider = None;
+                        state.login_phase = LoginPhase::Idle;
+                        state.login_message = Some(format!(
+                            "Claude-Anmeldung fehlgeschlagen (Exit-Code {}).",
+                            code
+                        ));
+                        tracing::warn!("Claude reauthentication failed with exit code {}", code);
+                    }
+                    Err(error) => {
+                        state.login_provider = None;
+                        state.login_phase = LoginPhase::Idle;
+                        state.login_message = Some(format!(
+                            "Claude-Anmeldung konnte nicht gestartet werden: {error}"
+                        ));
+                        tracing::error!("Failed to launch Claude reauthentication: {}", error);
+                    }
+                }
+            }
+            ctx.request_repaint();
+        });
+    }
+
     /// Get an animated value that smoothly transitions to the target over 300ms.
     ///
     /// This helper provides consistent animation behavior for progress bar fills
@@ -1611,6 +1782,22 @@ impl eframe::App for CodexBarApp {
             }
         }
 
+        let refresh_after_login = if let Ok(mut state) = self.state.lock() {
+            if state.refresh_after_login && !state.is_refreshing {
+                state.refresh_after_login = false;
+                state.login_provider = None;
+                state.login_phase = LoginPhase::Idle;
+                true
+            } else {
+                false
+            }
+        } else {
+            false
+        };
+        if refresh_after_login {
+            self.refresh_providers();
+        }
+
         // Auto-refresh check
         let should_refresh = {
             if self.settings.refresh_interval_secs == 0 {
@@ -1627,7 +1814,7 @@ impl eframe::App for CodexBarApp {
                 false
             }
         };
-        if should_refresh {
+        if should_refresh && !refresh_after_login {
             self.refresh_providers();
         }
 
@@ -1714,8 +1901,10 @@ impl eframe::App for CodexBarApp {
             }
         };
 
-        let (_login_provider, login_phase, _login_message) = login_state;
-        let is_logging_in = _login_provider.is_some() && login_phase != LoginPhase::Idle;
+        let (login_provider, login_phase, _login_message) = login_state;
+        let is_logging_in = login_provider.is_some() && login_phase != LoginPhase::Idle;
+        let claude_reauthentication_in_progress =
+            login_provider.as_deref() == Some("claude") && login_phase != LoginPhase::Idle;
 
         ctx.request_repaint_after(
             if is_refreshing || surprise_state.is_some() || is_logging_in {
@@ -2095,7 +2284,7 @@ impl eframe::App for CodexBarApp {
 
                         if !visible_providers.is_empty() {
                             let mut manual_refresh_requested = false;
-                            let mut account_switch_provider: Option<String> = None;
+                            let mut provider_card_action = ProviderCardAction::default();
                             let show_credits = self.settings.show_credits_extra_usage;
                             let show_as_used = self.settings.show_as_used;
                             let hide_personal_info = self.settings.hide_personal_info;
@@ -2143,15 +2332,15 @@ impl eframe::App for CodexBarApp {
                                     .id_salt(("provider_details", &selected_provider.name))
                                     .default_open(false)
                                     .show(ui, |ui| {
-                                        let switch = draw_provider_detail_card(
+                                        provider_card_action = draw_provider_detail_card(
                                             ui,
                                             selected_provider,
                                             &mut self.icon_cache,
                                             show_credits,
                                             show_as_used,
                                             hide_personal_info,
+                                            claude_reauthentication_in_progress,
                                         );
-                                        account_switch_provider = switch;
                                     });
                             } else if let Some((_, first_provider)) = visible_providers.first() {
                                 // Fallback to first if selected isn't visible
@@ -2159,15 +2348,15 @@ impl eframe::App for CodexBarApp {
                                     .id_salt(("provider_details", &first_provider.name))
                                     .default_open(false)
                                     .show(ui, |ui| {
-                                        let switch = draw_provider_detail_card(
+                                        provider_card_action = draw_provider_detail_card(
                                             ui,
                                             first_provider,
                                             &mut self.icon_cache,
                                             show_credits,
                                             show_as_used,
                                             hide_personal_info,
+                                            claude_reauthentication_in_progress,
                                         );
-                                        account_switch_provider = switch;
                                     });
                             }
 
@@ -2176,8 +2365,14 @@ impl eframe::App for CodexBarApp {
                                 self.refresh_providers();
                             }
 
+                            if let Some(ProviderRecoveryAction::ClaudeReauthenticate) =
+                                provider_card_action.recovery
+                            {
+                                self.start_claude_reauthentication(ctx.clone());
+                            }
+
                             // Handle account switch request - open preferences to Providers tab with provider selected
-                            if let Some(provider_name) = account_switch_provider {
+                            if let Some(provider_name) = provider_card_action.account_switch_provider {
                                 if let Some(provider_id) = ProviderId::from_cli_name(&provider_name) {
                                     self.preferences_window.active_tab = super::preferences::PreferencesTab::Providers;
                                     self.preferences_window.selected_provider = Some(provider_id);
@@ -3114,7 +3309,13 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
 
 /// Draw a provider detail card - macOS UsageMenuCardView style
 /// Structure: Header -> Divider -> Metrics (Session, Weekly, Model) -> Credits -> Cost
-/// Returns the provider name when an account switch is requested.
+/// Returns the action selected in the provider card.
+#[derive(Default)]
+struct ProviderCardAction {
+    account_switch_provider: Option<String>,
+    recovery: Option<ProviderRecoveryAction>,
+}
+
 fn draw_provider_detail_card(
     ui: &mut egui::Ui,
     provider: &ProviderData,
@@ -3122,8 +3323,9 @@ fn draw_provider_detail_card(
     show_credits_extra: bool,
     show_as_used: bool,
     hide_personal_info: bool,
-) -> Option<String> {
-    let mut account_switch_requested: Option<String> = None;
+    claude_reauthentication_in_progress: bool,
+) -> ProviderCardAction {
+    let mut action = ProviderCardAction::default();
     let brand_color = provider_color(&provider.name);
     let content_width = ui.available_width() - 32.0; // 16px padding each side
 
@@ -3181,6 +3383,12 @@ fn draw_provider_detail_card(
                             RichText::new(error)
                                 .size(FontSize::XS) // 11px footnote
                                 .color(Theme::RED),
+                        );
+                    } else if let Some(notice) = &provider.notice {
+                        ui.label(
+                            RichText::new(notice)
+                                .size(FontSize::XS)
+                                .color(Theme::ORANGE),
                         );
                     } else {
                         ui.label(
@@ -3757,7 +3965,7 @@ fn draw_provider_detail_card(
                 ProviderId::from_cli_name(&provider.name).unwrap_or(ProviderId::Claude),
             ) {
                 if draw_menu_item(ui, "->", "Konto wechseln...") {
-                    account_switch_requested = Some(provider.name.clone());
+                    action.account_switch_provider = Some(provider.name.clone());
                 }
             }
 
@@ -3776,6 +3984,27 @@ fn draw_provider_detail_card(
                 }
             }
 
+            if let Some(recovery) = provider
+                .error
+                .as_deref()
+                .or(provider.notice.as_deref())
+                .and_then(|message| provider_recovery_action(&provider.name, message))
+            {
+                if claude_reauthentication_in_progress {
+                    ui.horizontal(|ui| {
+                        ui.add_space(Spacing::SM);
+                        ui.spinner();
+                        ui.label(
+                            RichText::new("Claude-Anmeldung läuft...")
+                                .size(FontSize::SM)
+                                .color(Theme::TEXT_SECONDARY),
+                        );
+                    });
+                } else if draw_menu_item(ui, "🔑", "Erneut anmelden") {
+                    action.recovery = Some(recovery);
+                }
+            }
+
             // Copy Error link
             if let Some(ref error) = provider.error {
                 let error_text = error.clone();
@@ -3789,7 +4018,7 @@ fn draw_provider_detail_card(
             ui.add_space(4.0);
         }
 
-        account_switch_requested
+        action
     })
     .inner
 }

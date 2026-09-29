@@ -41,6 +41,14 @@ Usage source picker:
   - `seven_day_sonnet` / `seven_day_opus` → model-specific weekly window.
   - `extra_usage` → Extra usage cost (monthly spend/limit).
 - Plan inference: `rate_limit_tier` from credentials maps to Max/Pro/Team/Enterprise.
+- Token refresh (Windows fork): CodexBar refreshes an expired access token itself and writes the rotated tokens
+  plus `refreshTokenExpiresAt` back to the credentials file.
+  - `refreshTokenExpiresAt` is the absolute end of the login (about 30 days). Rotating the refresh token does not
+    extend it; after that only `claude auth login` helps. The token endpoint answers `invalid_grant` /
+    `Refresh token expired`, so CodexBar skips the call once the local timestamp has passed.
+  - The Claude desktop app does not maintain `~/.claude/.credentials.json`; only the CLI and CodexBar write it.
+    Users who work in the desktop app never see the CLI's expiry warning, so CodexBar shows the same warning
+    during the last three days, with an "Erneut anmelden" action that runs `claude auth login --claudeai`.
 
 ## Web API (cookies)
 - Preferences → Providers → Claude → Cookie source (Automatic or Manual).

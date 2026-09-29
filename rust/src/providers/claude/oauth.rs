@@ -15,6 +15,8 @@ pub struct ClaudeOAuthCredentials {
     pub access_token: String,
     pub refresh_token: Option<String>,
     pub expires_at: Option<DateTime<Utc>>,
+    /// Absolute end of the login: rotating the refresh token does not extend it.
+    pub refresh_token_expires_at: Option<DateTime<Utc>>,
     pub scopes: Vec<String>,
     pub rate_limit_tier: Option<String>,
 }
@@ -52,6 +54,8 @@ struct OAuthData {
     refresh_token: Option<String>,
     #[serde(rename = "expiresAt")]
     expires_at: Option<f64>, // milliseconds since epoch
+    #[serde(rename = "refreshTokenExpiresAt")]
+    refresh_token_expires_at: Option<f64>, // milliseconds since epoch
     scopes: Option<Vec<String>>,
     #[serde(rename = "rateLimitTier")]
     rate_limit_tier: Option<String>,
@@ -64,6 +68,8 @@ struct RefreshTokenResponse {
     refresh_token: Option<String>,
     /// Lifetime of the new access token in seconds.
     expires_in: Option<i64>,
+    /// Remaining lifetime of the login in seconds.
+    refresh_token_expires_in: Option<i64>,
 }
 
 /// OAuth usage response from Claude API
@@ -80,7 +86,28 @@ pub struct OAuthUsageResponse {
 
     pub seven_day_opus: Option<UsageWindow>,
 
+    #[serde(default)]
+    pub limits: Vec<UsageLimit>,
+
     pub extra_usage: Option<ExtraUsage>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsageLimit {
+    pub kind: String,
+    pub percent: Option<f64>,
+    pub resets_at: Option<String>,
+    pub scope: Option<UsageLimitScope>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsageLimitScope {
+    pub model: Option<UsageLimitModel>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct UsageLimitModel {
+    pub display_name: Option<String>,
 }
 
 /// A usage window from the OAuth API
@@ -136,8 +163,7 @@ impl ClaudeOAuthFetcher {
 
         // Proactively refresh when we already know the token is expired.
         if credentials.is_expired() && credentials.refresh_token.is_some() {
-            let refresh_token = credentials.refresh_token.clone().unwrap();
-            credentials = self.refresh_and_persist(&refresh_token).await?;
+            credentials = self.refresh_and_persist(&credentials).await?;
         }
 
         let usage_response = match self.fetch_usage(&credentials).await {
@@ -147,14 +173,19 @@ impl ClaudeOAuthFetcher {
             Err(e)
                 if credentials.refresh_token.is_some() && Self::is_refreshable_oauth_error(&e) =>
             {
-                let refresh_token = credentials.refresh_token.clone().unwrap();
-                credentials = self.refresh_and_persist(&refresh_token).await?;
+                credentials = self.refresh_and_persist(&credentials).await?;
                 self.fetch_usage(&credentials).await?
             }
             Err(e) => return Err(e),
         };
 
-        let usage = self.build_usage_snapshot(&usage_response, &credentials);
+        let mut usage = self.build_usage_snapshot(&usage_response, &credentials);
+        if let Some(notice) = credentials
+            .refresh_token_expires_at
+            .and_then(|expires_at| login_expiry_notice(expires_at, Utc::now()))
+        {
+            usage = usage.with_notice(notice);
+        }
         Ok(ProviderFetchResult::new(usage, "oauth"))
     }
 
@@ -162,8 +193,29 @@ impl ClaudeOAuthFetcher {
     /// credentials back to the credentials file, and return the updated set.
     async fn refresh_and_persist(
         &self,
-        refresh_token: &str,
+        credentials: &ClaudeOAuthCredentials,
     ) -> Result<ClaudeOAuthCredentials, ProviderError> {
+        let Some(refresh_token) = credentials.refresh_token.as_deref() else {
+            return Err(ProviderError::OAuth(
+                "Claude OAuth refresh token missing. Run `claude auth login` to sign in again."
+                    .to_string(),
+            ));
+        };
+
+        // Once the login itself has ended, only a new login helps, so skip the
+        // token endpoint instead of asking it every poll.
+        if let Some(expired_at) = credentials
+            .refresh_token_expires_at
+            .filter(|expires_at| *expires_at <= Utc::now())
+        {
+            return Err(ProviderError::OAuth(format!(
+                "Claude login expired on {} (refresh token expired). Run `claude auth login` to sign in again.",
+                expired_at
+                    .with_timezone(&chrono::Local)
+                    .format("%Y-%m-%d %H:%M")
+            )));
+        }
+
         let body = serde_json::json!({
             "grant_type": "refresh_token",
             "refresh_token": refresh_token,
@@ -182,7 +234,7 @@ impl ClaudeOAuthFetcher {
             let status = response.status();
             let text = response.text().await.unwrap_or_default();
             return Err(ProviderError::OAuth(format!(
-                "Token refresh failed ({}): {}. Run `claude` to re-authenticate.",
+                "Token refresh failed ({}): {}. Run `claude auth login` to sign in again.",
                 status,
                 text.chars().take(200).collect::<String>()
             )));
@@ -203,15 +255,23 @@ impl ClaudeOAuthFetcher {
         let expires_at = refreshed
             .expires_in
             .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
+        let refresh_token_expires_at = refreshed
+            .refresh_token_expires_in
+            .map(|secs| Utc::now() + chrono::Duration::seconds(secs));
 
-        self.persist_refreshed_tokens(&refreshed.access_token, &new_refresh, expires_at)?;
+        self.persist_refreshed_tokens(
+            &refreshed.access_token,
+            &new_refresh,
+            expires_at,
+            refresh_token_expires_at,
+        )?;
 
         // Reload from disk so we pick up everything (scopes, tier, ...) plus the
         // freshly written tokens, keeping a single source of truth.
         self.load_from_file()
     }
 
-    /// Surgically update the three token fields inside the credentials file
+    /// Surgically update the token fields inside the credentials file
     /// without dropping any other keys (subscriptionType, mcpOAuth, ...).
     /// Written atomically via a temp file + rename to avoid corrupting the file
     /// if the `claude` CLI reads it concurrently.
@@ -220,6 +280,7 @@ impl ClaudeOAuthFetcher {
         access_token: &str,
         refresh_token: &str,
         expires_at: Option<DateTime<Utc>>,
+        refresh_token_expires_at: Option<DateTime<Utc>>,
     ) -> Result<(), ProviderError> {
         let path = self.credentials_path()?;
         let content = std::fs::read_to_string(&path)
@@ -247,6 +308,13 @@ impl ClaudeOAuthFetcher {
             let millis = expires_at.timestamp_millis();
             oauth.insert(
                 "expiresAt".to_string(),
+                serde_json::Value::Number(millis.into()),
+            );
+        }
+        if let Some(refresh_token_expires_at) = refresh_token_expires_at {
+            let millis = refresh_token_expires_at.timestamp_millis();
+            oauth.insert(
+                "refreshTokenExpiresAt".to_string(),
                 serde_json::Value::Number(millis.into()),
             );
         }
@@ -297,6 +365,7 @@ impl ClaudeOAuthFetcher {
             access_token: token.to_string(),
             refresh_token: None,
             expires_at: None, // Environment tokens don't expire
+            refresh_token_expires_at: None,
             scopes,
             rate_limit_tier: None,
         })
@@ -342,11 +411,15 @@ impl ClaudeOAuthFetcher {
             let secs = (millis / 1000.0) as i64;
             DateTime::from_timestamp(secs, 0).unwrap_or_else(Utc::now)
         });
+        let refresh_token_expires_at = oauth
+            .refresh_token_expires_at
+            .and_then(|millis| DateTime::from_timestamp((millis / 1000.0) as i64, 0));
 
         Ok(ClaudeOAuthCredentials {
             access_token,
             refresh_token: oauth.refresh_token,
             expires_at,
+            refresh_token_expires_at,
             scopes: oauth.scopes.unwrap_or_default(),
             rate_limit_tier: oauth.rate_limit_tier,
         })
@@ -404,7 +477,8 @@ impl ClaudeOAuthFetcher {
 
             if status.as_u16() == 401 {
                 return Err(ProviderError::OAuth(
-                    "OAuth token invalid or expired. Run `claude` to re-authenticate.".to_string(),
+                    "OAuth token invalid or expired. Run `claude auth login` to sign in again."
+                        .to_string(),
                 ));
             }
 
@@ -453,17 +527,19 @@ impl ClaudeOAuthFetcher {
             usage = usage.with_secondary(weekly);
         }
 
-        // Model-specific: Opus or Sonnet
-        if let Some(opus) = response
+        // Model-specific: scoped limits (for example Fable), then legacy fields.
+        if let Some(scoped) = Self::scoped_model_window(response) {
+            usage = usage.with_model_specific(scoped);
+        } else if let Some(opus) = response
             .seven_day_opus
             .as_ref()
-            .and_then(|w| Self::to_rate_window(w, Some(10080)))
+            .and_then(|w| Self::to_named_rate_window(w, "Opus"))
         {
             usage = usage.with_model_specific(opus);
         } else if let Some(sonnet) = response
             .seven_day_sonnet
             .as_ref()
-            .and_then(|w| Self::to_rate_window(w, Some(10080)))
+            .and_then(|w| Self::to_named_rate_window(w, "Sonnet"))
         {
             usage = usage.with_model_specific(sonnet);
         }
@@ -476,6 +552,42 @@ impl ClaudeOAuthFetcher {
         }
 
         usage
+    }
+
+    fn scoped_model_window(response: &OAuthUsageResponse) -> Option<RateWindow> {
+        let limit = response.limits.iter().find(|limit| {
+            limit.kind == "weekly_scoped"
+                && limit
+                    .scope
+                    .as_ref()
+                    .and_then(|scope| scope.model.as_ref())
+                    .and_then(|model| model.display_name.as_deref())
+                    .is_some_and(|name| !name.trim().is_empty())
+        })?;
+        let percent = limit.percent?;
+        let resets_at = limit.resets_at.as_deref().and_then(parse_iso8601_date);
+        let model_name = limit
+            .scope
+            .as_ref()?
+            .model
+            .as_ref()?
+            .display_name
+            .as_ref()?
+            .trim()
+            .to_string();
+
+        Some(RateWindow::with_details(
+            percent,
+            Some(10_080),
+            resets_at,
+            Some(model_name),
+        ))
+    }
+
+    fn to_named_rate_window(window: &UsageWindow, name: &str) -> Option<RateWindow> {
+        let mut rate_window = Self::to_rate_window(window, Some(10_080))?;
+        rate_window.reset_description = Some(name.to_string());
+        Some(rate_window)
     }
 
     /// Convert OAuth usage window to RateWindow
@@ -523,9 +635,77 @@ fn format_reset_date(date: DateTime<Utc>) -> String {
     date.format("%b %-d at %-I:%M%p").to_string()
 }
 
+/// Warn during the last three days of the login, like the `claude` CLI does.
+/// Desktop-app users rarely run the CLI, so CodexBar is where they see it.
+fn login_expiry_notice(expires_at: DateTime<Utc>, now: DateTime<Utc>) -> Option<String> {
+    const DAY_SECS: i64 = 86_400;
+    let remaining = (expires_at - now).num_seconds();
+    if remaining <= 0 || remaining > 3 * DAY_SECS {
+        return None;
+    }
+    let days = (remaining + DAY_SECS - 1) / DAY_SECS;
+    Some(format!(
+        "Claude login expires in {} day{}. Run `claude auth login` to renew.",
+        days,
+        if days == 1 { "" } else { "s" }
+    ))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn test_credentials() -> ClaudeOAuthCredentials {
+        ClaudeOAuthCredentials {
+            access_token: "test-token".to_string(),
+            refresh_token: None,
+            expires_at: None,
+            refresh_token_expires_at: None,
+            scopes: vec![],
+            rate_limit_tier: Some("default_claude_max_20x".to_string()),
+        }
+    }
+
+    #[test]
+    fn warns_only_in_last_three_days_of_login() {
+        let now = Utc::now();
+        let notice = |hours| login_expiry_notice(now + chrono::Duration::hours(hours), now);
+
+        assert_eq!(notice(73), None);
+        assert_eq!(
+            notice(72).as_deref(),
+            Some("Claude login expires in 3 days. Run `claude auth login` to renew.")
+        );
+        assert_eq!(
+            notice(5).as_deref(),
+            Some("Claude login expires in 1 day. Run `claude auth login` to renew.")
+        );
+        assert_eq!(notice(0), None);
+        assert_eq!(notice(-1), None);
+    }
+
+    #[tokio::test]
+    async fn expired_login_fails_without_calling_token_endpoint() {
+        let credentials = ClaudeOAuthCredentials {
+            refresh_token: Some("dead-refresh-token".to_string()),
+            expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            refresh_token_expires_at: Some(Utc::now() - chrono::Duration::hours(1)),
+            ..test_credentials()
+        };
+
+        let error = ClaudeOAuthFetcher::new()
+            .refresh_and_persist(&credentials)
+            .await
+            .expect_err("expired login must not refresh");
+
+        // Only the local check produces this wording; the token endpoint's
+        // rejection reads "Token refresh failed ...".
+        let ProviderError::OAuth(message) = error else {
+            panic!("expected OAuth error, got {error:?}");
+        };
+        assert!(message.starts_with("Claude login expired on"));
+        assert!(message.contains("claude auth login"));
+    }
 
     #[test]
     fn refreshes_only_token_expiry_errors() {
@@ -547,5 +727,46 @@ mod tests {
         assert!(!ClaudeOAuthFetcher::is_refreshable_oauth_error(
             &ProviderError::Other("not oauth".to_string())
         ));
+    }
+
+    #[test]
+    fn maps_scoped_fable_limit_to_model_usage() {
+        let response: OAuthUsageResponse = serde_json::from_value(serde_json::json!({
+            "five_hour": {
+                "utilization": 27.0,
+                "resets_at": "2026-07-16T22:49:59.726923+02:00"
+            },
+            "seven_day": {
+                "utilization": 19.0,
+                "resets_at": "2026-07-22T06:59:59.726944+02:00"
+            },
+            "limits": [
+                {
+                    "kind": "weekly_scoped",
+                    "group": "weekly",
+                    "percent": 20.0,
+                    "resets_at": "2026-07-22T06:59:59.727202+02:00",
+                    "scope": {
+                        "model": {
+                            "id": null,
+                            "display_name": "Fable"
+                        }
+                    },
+                    "is_active": false
+                }
+            ]
+        }))
+        .unwrap();
+
+        let snapshot =
+            ClaudeOAuthFetcher::new().build_usage_snapshot(&response, &test_credentials());
+        let fable = snapshot
+            .model_specific
+            .expect("Fable must be exposed as the scoped model window");
+
+        assert!((fable.used_percent - 20.0).abs() < f64::EPSILON);
+        assert_eq!(fable.window_minutes, Some(10_080));
+        assert_eq!(fable.reset_description.as_deref(), Some("Fable"));
+        assert!(fable.resets_at.is_some());
     }
 }

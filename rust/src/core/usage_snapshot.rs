@@ -33,6 +33,10 @@ pub struct UsageSnapshot {
     /// Login method/plan info (e.g., "Claude Pro", "Claude Max")
     #[serde(skip_serializing_if = "Option::is_none")]
     pub login_method: Option<String>,
+
+    /// Non-blocking hint for the user (e.g., login about to expire)
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 impl UsageSnapshot {
@@ -46,6 +50,7 @@ impl UsageSnapshot {
             account_email: None,
             account_organization: None,
             login_method: None,
+            notice: None,
         }
     }
 
@@ -76,6 +81,12 @@ impl UsageSnapshot {
     /// Builder pattern: set login method
     pub fn with_login_method(mut self, method: impl Into<String>) -> Self {
         self.login_method = Some(method.into());
+        self
+    }
+
+    /// Builder pattern: set notice
+    pub fn with_notice(mut self, notice: impl Into<String>) -> Self {
+        self.notice = Some(notice.into());
         self
     }
 
