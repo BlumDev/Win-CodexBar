@@ -152,7 +152,7 @@ fn run() -> i32 {
             let _guard = match single_instance::SingleInstanceGuard::try_acquire() {
                 Some(guard) => guard,
                 None => {
-                    // Can't print to console anymore, just exit
+                    single_instance::activate_existing_instance();
                     return exit_codes::SUCCESS;
                 }
             };
@@ -201,7 +201,14 @@ fn run() -> i32 {
             let _guard = match single_instance::SingleInstanceGuard::try_acquire() {
                 Some(guard) => guard,
                 None => {
+                    let activated = single_instance::activate_existing_instance();
                     let _ = std::fs::write(&log_path, "Already running, exiting\n");
+                    if !activated {
+                        let _ = std::fs::write(
+                            &log_path,
+                            "Already running, but window activation failed\n",
+                        );
+                    }
                     return exit_codes::SUCCESS;
                 }
             };

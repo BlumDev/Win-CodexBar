@@ -90,3 +90,57 @@ impl Drop for SingleInstanceGuard {
         // No-op on non-Windows
     }
 }
+
+/// Restore and center an already-running CodexBar window.
+#[cfg(windows)]
+pub fn activate_existing_instance() -> bool {
+    use windows::Win32::Foundation::RECT;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        FindWindowW, GetWindowRect, IsIconic, MoveWindow, SPI_GETWORKAREA, SW_RESTORE, SW_SHOW,
+        SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS, SetForegroundWindow, ShowWindow,
+        SystemParametersInfoW,
+    };
+    use windows::core::w;
+
+    unsafe {
+        let Ok(hwnd) = FindWindowW(None, w!("CodexBar")) else {
+            return false;
+        };
+        if hwnd.is_invalid() {
+            return false;
+        }
+
+        let mut window_rect = RECT::default();
+        let mut work_area = RECT::default();
+        if GetWindowRect(hwnd, &mut window_rect).is_err()
+            || SystemParametersInfoW(
+                SPI_GETWORKAREA,
+                0,
+                Some((&mut work_area as *mut RECT).cast()),
+                SYSTEM_PARAMETERS_INFO_UPDATE_FLAGS(0),
+            )
+            .is_err()
+        {
+            return false;
+        }
+
+        let width = (window_rect.right - window_rect.left).max(680);
+        let height = (window_rect.bottom - window_rect.top).max(820);
+        let x = work_area.left + ((work_area.right - work_area.left - width).max(0) / 2);
+        let y = work_area.top + ((work_area.bottom - work_area.top - height).max(0) / 2);
+
+        if IsIconic(hwnd).as_bool() {
+            let _ = ShowWindow(hwnd, SW_RESTORE);
+        } else {
+            let _ = ShowWindow(hwnd, SW_SHOW);
+        }
+        let _ = MoveWindow(hwnd, x, y, width, height, true);
+        let _ = SetForegroundWindow(hwnd);
+        true
+    }
+}
+
+#[cfg(not(windows))]
+pub fn activate_existing_instance() -> bool {
+    false
+}

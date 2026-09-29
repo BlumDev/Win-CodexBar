@@ -1497,6 +1497,8 @@ impl eframe::App for CodexBarApp {
         }
         if shortcut_triggered {
             tracing::info!("Keyboard shortcut triggered - focusing window");
+            self.pending_main_window_layout = true;
+            self.anchor_main_window_to_pointer = true;
             restore_main_window();
             ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
             ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
@@ -1774,6 +1776,8 @@ impl eframe::App for CodexBarApp {
                 match action {
                     TrayMenuAction::Quit => std::process::exit(0),
                     TrayMenuAction::Open => {
+                        self.pending_main_window_layout = true;
+                        self.anchor_main_window_to_pointer = true;
                         restore_main_window();
                         ctx.send_viewport_cmd(egui::ViewportCommand::Visible(true));
                         ctx.send_viewport_cmd(egui::ViewportCommand::Focus);
