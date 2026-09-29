@@ -197,12 +197,12 @@ impl CursorApi {
                 let total_spend_cents = plan.total_spend.unwrap_or(0) as f64;
                 let included_spend_cents = plan.included_spend.unwrap_or(0) as f64;
                 let limit_cents = plan.limit.unwrap_or(0) as f64;
-                let percent = if limit_cents > 0.0 {
+                let percent = if let Some(total_percent) = plan.total_percent_used {
+                    normalize_cursor_percent(total_percent)
+                } else if limit_cents > 0.0 {
                     (included_spend_cents / limit_cents) * 100.0
                 } else {
-                    plan.total_percent_used
-                        .map(normalize_cursor_percent)
-                        .unwrap_or(0.0)
+                    0.0
                 };
                 let secondary = plan.auto_percent_used.map(|value| {
                     RateWindow::with_details(
@@ -544,18 +544,17 @@ mod tests {
     }
 
     #[test]
-    fn test_cursor_build_result_accepts_desktop_usage_payload() {
+    fn test_cursor_build_result_prefers_desktop_total_percent() {
         let json = r#"{
             "billingCycleStart": "1781648722000",
             "billingCycleEnd": "1784240722000",
             "planUsage": {
-                "totalSpend": 421,
-                "includedSpend": 421,
-                "remaining": 1579,
+                "totalSpend": 2025,
+                "includedSpend": 2000,
                 "limit": 2000,
-                "autoPercentUsed": 0.0,
-                "apiPercentUsed": 9.355555555555556,
-                "totalPercentUsed": 2.158974358974359
+                "autoPercentUsed": 0.8333333333333334,
+                "apiPercentUsed": 39.44444444444444,
+                "totalPercentUsed": 5.869565217391305
             },
             "enabled": true
         }"#;
@@ -564,17 +563,17 @@ mod tests {
         let (primary, secondary, model_specific, cost, _, _) =
             api().build_result(summary, None).unwrap();
 
-        assert!((primary.used_percent - 21.05).abs() < 0.01);
+        assert!((primary.used_percent - 5.869565217391305).abs() < 0.01);
         assert_eq!(primary.window_minutes, Some(43_200));
 
         let auto = secondary.expect("desktop payload includes the Auto lane");
-        assert!(auto.used_percent.abs() < f64::EPSILON);
+        assert!((auto.used_percent - 0.8333333333333334).abs() < 0.01);
 
         let api_lane = model_specific.expect("desktop payload includes the API lane");
-        assert!((api_lane.used_percent - 9.355555555555556).abs() < 0.01);
+        assert!((api_lane.used_percent - 39.44444444444444).abs() < 0.01);
 
         let cost = cost.expect("desktop payload includes plan spend");
-        assert!((cost.used - 4.21).abs() < 0.01);
+        assert!((cost.used - 20.25).abs() < 0.01);
         assert_eq!(cost.limit, Some(20.0));
     }
 

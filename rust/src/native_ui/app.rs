@@ -500,8 +500,38 @@ mod usage_display_tests {
         assert!(!rendered_text.contains("5h"));
         assert!(!rendered_text.contains("No data"));
         assert!(rendered_text.contains("Week"));
+        assert!(!rendered_text.contains("used"));
+        assert!(!rendered_text.contains("remaining"));
         assert!(!should_show_usage_trend(&provider, "Primary"));
         assert!(should_show_usage_trend(&provider, "Secondary"));
+    }
+
+    #[test]
+    fn claude_scoped_model_usage_is_visible_in_dashboard() {
+        let mut fable = RateWindow::with_details(20.0, Some(10_080), None, None);
+        fable.reset_description = Some("Fable".to_string());
+        let usage = UsageSnapshot::new(RateWindow::with_details(27.0, Some(300), None, None))
+            .with_secondary(RateWindow::with_details(19.0, Some(10_080), None, None))
+            .with_model_specific(fable);
+        let result = ProviderFetchResult::new(usage, "oauth");
+        let metadata = ProviderMetadata {
+            id: ProviderId::Claude,
+            display_name: "Claude",
+            session_label: "5h",
+            weekly_label: "Weekly",
+            supports_opus: true,
+            supports_credits: true,
+            default_enabled: true,
+            is_primary: true,
+            dashboard_url: None,
+            status_page_url: None,
+        };
+        let provider = ProviderData::from_result(ProviderId::Claude, &result, &metadata, true);
+
+        let rendered_text = rendered_dashboard_stats_text(&provider);
+
+        assert!(rendered_text.contains("Fable"));
+        assert!(rendered_text.contains("20%"));
     }
 
     fn rendered_dashboard_stats_text(provider: &ProviderData) -> String {
@@ -2280,12 +2310,6 @@ fn draw_overview_provider_row(
     is_selected: bool,
 ) -> bool {
     let brand_color = provider_color(&provider.name);
-    let primary_percent = provider
-        .session_percent
-        .map(|percent| usage_display_percent(percent, show_as_used));
-    let primary_color = primary_percent
-        .map(metric_severity_color)
-        .unwrap_or(Theme::TEXT_PRIMARY);
 
     let inner = egui::Frame::none()
         .fill(if is_selected {
@@ -2294,7 +2318,7 @@ fn draw_overview_provider_row(
             Theme::CARD_BG
         })
         .rounding(Rounding::same(Radius::SM))
-        .inner_margin(egui::Margin::symmetric(12.0, 8.0))
+        .inner_margin(egui::Margin::symmetric(8.0, 6.0))
         .stroke(Stroke::new(
             if is_selected { 1.0 } else { 0.5 },
             if is_selected {
@@ -2309,27 +2333,18 @@ fn draw_overview_provider_row(
                     let icon_char = provider_icon(&provider.name);
                     ui.label(
                         RichText::new(icon_char)
-                            .size(FontSize::BASE)
+                            .size(FontSize::SM)
                             .color(brand_color),
                     );
 
-                    ui.add_space(4.0);
+                    ui.add_space(2.0);
 
                     ui.label(
                         RichText::new(&provider.display_name)
-                            .size(FontSize::SM)
+                            .size(FontSize::XS)
                             .color(Theme::TEXT_PRIMARY)
                             .strong(),
                     );
-
-                    if let Some(source) = provider.source_label.as_ref() {
-                        ui.add_space(6.0);
-                        ui.label(
-                            RichText::new(source.to_uppercase())
-                                .size(FontSize::XS)
-                                .color(Theme::TEXT_MUTED),
-                        );
-                    }
 
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if provider.is_loading {
@@ -2341,25 +2356,18 @@ fn draw_overview_provider_row(
                                 error.clone()
                             };
                             ui.label(RichText::new(short).size(FontSize::XS).color(Theme::RED));
-                        } else if let Some(percent) = primary_percent {
-                            ui.label(
-                                RichText::new(usage_display_label(percent, show_as_used))
-                                    .size(FontSize::XS)
-                                    .color(primary_color)
-                                    .strong(),
-                            );
                         }
                     });
                 });
 
-                ui.add_space(6.0);
+                ui.add_space(4.0);
 
                 draw_provider_dashboard_bar(ui, provider, show_as_used, brand_color);
 
-                ui.add_space(5.0);
+                ui.add_space(3.0);
 
                 ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = Vec2::new(6.0, 4.0);
+                    ui.spacing_mut().item_spacing = Vec2::new(5.0, 2.0);
                     draw_provider_dashboard_stats(ui, provider, show_as_used);
                 });
             });
@@ -2390,6 +2398,10 @@ fn draw_dashboard_stat_with_detail_color(
     value_color: Color32,
     detail_color: Option<Color32>,
 ) {
+    let compact_value = value
+        .strip_suffix(" used")
+        .or_else(|| value.strip_suffix(" remaining"))
+        .unwrap_or(&value);
     ui.horizontal(|ui| {
         ui.label(
             RichText::new(format!("{}:", label))
@@ -2397,7 +2409,7 @@ fn draw_dashboard_stat_with_detail_color(
                 .color(Theme::TEXT_SECONDARY),
         );
         ui.label(
-            RichText::new(value)
+            RichText::new(compact_value)
                 .size(FontSize::XS)
                 .color(value_color)
                 .strong(),
@@ -2421,9 +2433,11 @@ fn draw_provider_dashboard_bar(
     match provider.name.as_str() {
         "claude" => {
             let bar_width = ui.available_width();
-            let bar_height = 5.0;
-            let bar_gap = 3.0;
-            let total_height = (bar_height * 2.0) + bar_gap;
+            let bar_height = 7.0;
+            let bar_gap = 4.0;
+            let bar_count = 2 + usize::from(provider.model_percent.is_some());
+            let total_height =
+                (bar_height * bar_count as f32) + (bar_gap * bar_count.saturating_sub(1) as f32);
             let (stack_rect, _) =
                 ui.allocate_exact_size(Vec2::new(bar_width, total_height), egui::Sense::hover());
             let session_rect =
@@ -2432,8 +2446,20 @@ fn draw_provider_dashboard_bar(
                 egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
                 Vec2::new(bar_width, bar_height),
             );
+            let model_rect = provider.model_percent.map(|_| {
+                Rect::from_min_size(
+                    egui::pos2(
+                        stack_rect.min.x,
+                        stack_rect.min.y + (bar_height + bar_gap) * 2.0,
+                    ),
+                    Vec2::new(bar_width, bar_height),
+                )
+            });
 
-            for rect in [session_rect, weekly_rect] {
+            for rect in [Some(session_rect), Some(weekly_rect), model_rect]
+                .into_iter()
+                .flatten()
+            {
                 ui.painter().rect_filled(
                     rect,
                     Rounding::same(bar_height / 2.0),
@@ -2473,34 +2499,60 @@ fn draw_provider_dashboard_bar(
                     show_as_used,
                 );
             }
+            if let (Some(model_percent), Some(model_rect)) = (provider.model_percent, model_rect) {
+                let display_percent = usage_display_percent(model_percent, show_as_used);
+                fill_bar(
+                    ui,
+                    model_rect,
+                    display_percent,
+                    tinted(metric_severity_color(display_percent), 190),
+                );
+                draw_pace_marker(
+                    ui,
+                    model_rect,
+                    display_percent,
+                    provider.model_pace_percent,
+                    show_as_used,
+                );
+            }
         }
         "codex" => {
             let bar_width = ui.available_width();
-            let bar_height = 5.0;
-            let bar_gap = 3.0;
-            let total_height = (bar_height * 2.0) + bar_gap;
+            let bar_height = 7.0;
+            let bar_gap = 4.0;
+            let has_session = provider.session_percent.is_some();
+            let bar_count = 1 + usize::from(has_session);
+            let total_height =
+                (bar_height * bar_count as f32) + (bar_gap * bar_count.saturating_sub(1) as f32);
             let (stack_rect, _) =
                 ui.allocate_exact_size(Vec2::new(bar_width, total_height), egui::Sense::hover());
 
-            let session_rect =
-                Rect::from_min_size(stack_rect.min, Vec2::new(bar_width, bar_height));
+            let session_rect = has_session
+                .then(|| Rect::from_min_size(stack_rect.min, Vec2::new(bar_width, bar_height)));
             let weekly_rect = Rect::from_min_size(
-                egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
+                egui::pos2(
+                    stack_rect.min.x,
+                    stack_rect.min.y
+                        + if has_session {
+                            bar_height + bar_gap
+                        } else {
+                            0.0
+                        },
+                ),
                 Vec2::new(bar_width, bar_height),
             );
 
-            ui.painter().rect_filled(
-                session_rect,
-                Rounding::same(bar_height / 2.0),
-                Theme::progress_track(),
-            );
-            ui.painter().rect_filled(
-                weekly_rect,
-                Rounding::same(bar_height / 2.0),
-                Theme::progress_track(),
-            );
+            for rect in [session_rect, Some(weekly_rect)].into_iter().flatten() {
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::same(bar_height / 2.0),
+                    Theme::progress_track(),
+                );
+            }
 
-            if let Some(session_percent) = provider.session_percent {
+            if let (Some(session_percent), Some(session_rect)) =
+                (provider.session_percent, session_rect)
+            {
                 let display_percent = usage_display_percent(session_percent, show_as_used);
                 fill_bar(
                     ui,
@@ -2535,9 +2587,9 @@ fn draw_provider_dashboard_bar(
         }
         "cursor" => {
             let bar_width = ui.available_width();
-            let bar_height = 5.0;
-            let bar_gap = 3.0;
-            let total_height = (bar_height * 2.0) + bar_gap;
+            let bar_height = 7.0;
+            let bar_gap = 4.0;
+            let total_height = (bar_height * 3.0) + (bar_gap * 2.0);
             let (stack_rect, _) =
                 ui.allocate_exact_size(Vec2::new(bar_width, total_height), egui::Sense::hover());
 
@@ -2546,17 +2598,21 @@ fn draw_provider_dashboard_bar(
                 egui::pos2(stack_rect.min.x, stack_rect.min.y + bar_height + bar_gap),
                 Vec2::new(bar_width, bar_height),
             );
+            let total_rect = Rect::from_min_size(
+                egui::pos2(
+                    stack_rect.min.x,
+                    stack_rect.min.y + (bar_height + bar_gap) * 2.0,
+                ),
+                Vec2::new(bar_width, bar_height),
+            );
 
-            ui.painter().rect_filled(
-                auto_rect,
-                Rounding::same(bar_height / 2.0),
-                Theme::progress_track(),
-            );
-            ui.painter().rect_filled(
-                api_rect,
-                Rounding::same(bar_height / 2.0),
-                Theme::progress_track(),
-            );
+            for rect in [auto_rect, api_rect, total_rect] {
+                ui.painter().rect_filled(
+                    rect,
+                    Rounding::same(bar_height / 2.0),
+                    Theme::progress_track(),
+                );
+            }
 
             if let Some(auto_percent) = provider.weekly_percent {
                 let display_percent = usage_display_percent(auto_percent, show_as_used);
@@ -2598,6 +2654,29 @@ fn draw_provider_dashboard_bar(
                     api_rect,
                     display_percent,
                     provider.model_pace_percent,
+                    show_as_used,
+                );
+            }
+            if let Some(total_percent) = provider.session_percent {
+                let display_percent = usage_display_percent(total_percent, show_as_used);
+                fill_bar(
+                    ui,
+                    total_rect,
+                    display_percent,
+                    tinted(
+                        cursor_metric_color(
+                            display_percent,
+                            provider.session_pace_percent,
+                            provider.session_pace_lasts_to_reset,
+                        ),
+                        190,
+                    ),
+                );
+                draw_pace_marker(
+                    ui,
+                    total_rect,
+                    display_percent,
+                    provider.session_pace_percent,
                     show_as_used,
                 );
             }
@@ -2724,7 +2803,6 @@ fn draw_pace_marker(
 fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, show_as_used: bool) {
     match provider.name.as_str() {
         "claude" => {
-            let primary_label = provider.source_label.as_deref().unwrap_or("Primary");
             let session_display = provider
                 .session_percent
                 .map(|percent| usage_display_percent(percent, show_as_used));
@@ -2738,7 +2816,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
             });
             draw_dashboard_stat_with_detail_color(
                 ui,
-                &primary_label.to_uppercase(),
+                "5h",
                 provider
                     .session_percent
                     .map(|percent| {
@@ -2772,6 +2850,23 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     provider.weekly_reset.as_deref(),
                     metric_severity_color(weekly_display),
                     weekly_reset_color,
+                );
+            }
+            if let Some(model_percent) = provider.model_percent {
+                let model_display = usage_display_percent(model_percent, show_as_used);
+                let model_reset_color = pace_status(
+                    model_display,
+                    provider.model_pace_percent,
+                    provider.model_pace_lasts_to_reset,
+                )
+                .map(|(_, color)| color);
+                draw_dashboard_stat_with_detail_color(
+                    ui,
+                    provider.model_name.as_deref().unwrap_or("Modell"),
+                    usage_display_label(model_display, show_as_used),
+                    provider.model_reset.as_deref(),
+                    metric_severity_color(model_display),
+                    model_reset_color,
                 );
             }
         }
@@ -2818,7 +2913,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                     cursor_reset_time_color(auto_percent, provider.weekly_pace_percent);
                 draw_dashboard_stat_with_detail_color(
                     ui,
-                    "Auto+Composer",
+                    "Auto",
                     usage_display_label(auto_display, show_as_used),
                     provider.weekly_reset.as_deref(),
                     cursor_metric_color(
@@ -2851,7 +2946,7 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
             });
             draw_dashboard_stat_with_detail_color(
                 ui,
-                "Total",
+                "Gesamt",
                 provider
                     .session_percent
                     .map(|percent| {
@@ -3014,14 +3109,6 @@ fn draw_provider_dashboard_stats(ui: &mut egui::Ui, provider: &ProviderData, sho
                 );
             }
         }
-    }
-
-    if let Some(cost) = provider.cost_used.as_ref() {
-        draw_dashboard_stat(ui, "Spend", cost.clone(), None, Theme::TEXT_PRIMARY);
-    }
-
-    if let Some(plan) = provider.plan.as_ref() {
-        draw_dashboard_stat(ui, "Plan", plan.clone(), None, Theme::TEXT_PRIMARY);
     }
 }
 
@@ -3191,6 +3278,21 @@ fn draw_provider_detail_card(
                             content_width,
                             provider.pace_percent,
                             provider.pace_lasts_to_reset,
+                        );
+                    }
+                    if let Some(model_pct) = provider.model_percent {
+                        ui.add_space(12.0);
+                        let display_percent = usage_display_percent(model_pct, show_as_used);
+                        draw_metric_row(
+                            ui,
+                            provider.model_name.as_deref().unwrap_or("Modell"),
+                            model_pct,
+                            show_as_used,
+                            provider.model_reset.as_deref(),
+                            metric_severity_color(display_percent),
+                            content_width,
+                            provider.model_pace_percent,
+                            provider.model_pace_lasts_to_reset,
                         );
                     }
                 }
